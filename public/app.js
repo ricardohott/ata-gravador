@@ -383,7 +383,18 @@ function renderDetalhe(r) {
   }
 
   if (s) {
+    // Links de verdade (<a>), não script: é o caminho que o celular sempre abre,
+    // inclusive no iPhone, onde o compartilhar falhava depois de ler o banco.
+    const assunto = `Ata: ${s.titulo}`;
     corpo += `
+      <div class="bloco enviar">
+        <h3>Enviar a ata</h3>
+        <div class="acoes-detalhe">
+          <a class="btn whats" href="https://wa.me/?text=${encodeURIComponent(textoParaCompartilhar(r, 'whats'))}" target="_blank" rel="noopener">WhatsApp</a>
+          <a class="btn secundario" href="mailto:?subject=${encodeURIComponent(assunto)}&body=${encodeURIComponent(textoParaCompartilhar(r, 'email'))}">E-mail</a>
+          <button class="btn secundario" data-acao="copiar">Copiar</button>
+        </div>
+      </div>
       <div class="bloco"><h3>Resumo</h3><p>${esc(s.resumo)}</p>
         ${s.participantes?.length ? `<p class="sub" style="margin-top:8px">Participantes: ${esc(s.participantes.join(', '))}</p>` : ''}</div>
       <div class="bloco"><h3>Decisões</h3>${lista(s.decisoes)}</div>
@@ -406,7 +417,11 @@ function renderDetalhe(r) {
 
   $('#detalhe').innerHTML = cab + corpo;
   $('#detalhe').dataset.id = r.id;
+  reuniaoAberta = r;
 }
+
+// Guardada na hora de desenhar: compartilhar precisa sair no mesmo toque, sem esperar o banco.
+let reuniaoAberta = null;
 
 $('#detalhe').addEventListener('toggle', async (e) => {
   if (e.target.id !== 'audios' || !e.target.open) return;
@@ -427,6 +442,7 @@ $('#detalhe').addEventListener('toggle', async (e) => {
 $('#detalhe').addEventListener('click', async (e) => {
   const acao = e.target.dataset?.acao;
   if (!acao) return;
+  if (acao === 'copiar') return copiarAta();
   const id = $('#detalhe').dataset.id;
   const r = await lerReuniao(id);
   if (acao === 'tentar') processar(id);
@@ -438,29 +454,44 @@ $('#detalhe').addEventListener('click', async (e) => {
   }
 });
 
-function textoParaCompartilhar(r) {
+// A ata inteira em texto. No WhatsApp, *asterisco* vira negrito; no e-mail vira MAIÚSCULA.
+function textoParaCompartilhar(r, formato = 'whats') {
   const s = r.resumo;
   if (!s) return r.transcricao || '';
+  const titulo = (t) => (formato === 'whats' ? `*${t}*` : t.toUpperCase());
   const itens = (arr) => (arr || []).map((i) => `• ${i}`).join('\n');
+  const secao = (nome, arr) => arr?.length && `\n${titulo(nome)}\n${itens(arr)}`;
   return [
-    `*${s.titulo}*`, `${fmtData(r.inicio)} · ${fmtDuracao(r.duracaoSeg)}`, '',
-    s.resumo,
-    s.decisoes?.length && `\n*Decisões*\n${itens(s.decisoes)}`,
-    s.tarefas?.length && `\n*Tarefas*\n${itens(s.tarefas.map((t) => [t.descricao, t.responsavel, t.prazo].filter(Boolean).join(' — ')))}`,
-    s.proximos_passos?.length && `\n*Próximos passos*\n${itens(s.proximos_passos)}`,
-  ].filter((x) => x !== false && x != null).join('\n');
+    titulo(s.titulo), `${fmtData(r.inicio)} · ${fmtDuracao(r.duracaoSeg)}`,
+    s.participantes?.length && `Participantes: ${s.participantes.join(', ')}`,
+    '', s.resumo,
+    secao('Decisões', s.decisoes),
+    secao('Tarefas', s.tarefas?.map((t) => [t.descricao, t.responsavel, t.prazo].filter(Boolean).join(' — '))),
+    secao('Próximos passos', s.proximos_passos),
+    ...(s.topicos || []).map((t) => secao(t.titulo, t.pontos)),
+  ].filter((x) => x !== false && x != null && x !== undefined).join('\n');
 }
 
-$('#btn-compartilhar').addEventListener('click', async () => {
-  const r = await lerReuniao($('#detalhe').dataset.id);
-  const texto = textoParaCompartilhar(r);
-  if (!texto) return avisar('Ainda não há ata para compartilhar.');
-  if (navigator.share) {
-    try { await navigator.share({ title: r.resumo?.titulo || 'Ata', text: texto }); } catch { /* cancelado */ }
-  } else {
+async function copiarAta() {
+  const texto = reuniaoAberta && textoParaCompartilhar(reuniaoAberta);
+  if (!texto) return avisar('Ainda não há ata para copiar.');
+  try {
     await navigator.clipboard.writeText(texto);
     avisar('Ata copiada. É só colar no WhatsApp ou no e-mail.');
+  } catch {
+    avisar('Não consegui copiar. Use os botões WhatsApp ou E-mail.');
   }
+}
+
+$('#btn-compartilhar').addEventListener('click', () => {
+  const r = reuniaoAberta;
+  const texto = r && textoParaCompartilhar(r);
+  if (!texto) return avisar('Ainda não há ata para compartilhar.');
+  if (!navigator.share) return copiarAta();
+  // Sem await antes: o navegador só abre o menu de compartilhar dentro do próprio toque.
+  navigator.share({ text: texto }).catch((e) => {
+    if (e.name !== 'AbortError') copiarAta(); // falhou de verdade (não foi cancelado): copia
+  });
 });
 
 // ---------- início ----------

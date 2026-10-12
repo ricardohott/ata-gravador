@@ -102,6 +102,8 @@ details summary { cursor: pointer; color: var(--suave); }
 .transcricao { white-space: pre-wrap; color: #cbd5e1; font-size: 15px; margin-top: 12px; }
 audio { width: 100%; margin-top: 8px; }
 .acoes-detalhe { display: flex; gap: 8px; flex-wrap: wrap; }
+.enviar .acoes-detalhe .btn { flex: 1; text-align: center; text-decoration: none; }
+.whats { background: #25d366; color: #0b1a10; }
 
 .aviso {
   position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom));
