@@ -1,7 +1,7 @@
 // Abre o app mesmo sem internet (a gravação não depende de rede).
 // Rede primeiro, cache como reserva: atualização publicada chega sem precisar limpar nada.
-const CACHE = 'ata-v6';
-const ARQUIVOS = ['./', 'index.html', 'style.css', 'gemini.js', 'app.js', 'manifest.json', 'icon.svg', 'icon-192.png'];
+const CACHE = 'ata-v7';
+const ARQUIVOS = ['./', 'index.html', 'style.css', 'gemini.js', 'app.js', 'manifest.json', 'icon.svg', 'marca.svg', 'icon-192.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ARQUIVOS)).then(() => self.skipWaiting()));

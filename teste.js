@@ -19,7 +19,7 @@ const servidor = app.listen(0, async () => {
     const html = await (await fetch(base + '/')).text();
     confere('página inicial abre', html.includes('btn-gravar'));
     confere('gemini.js carrega antes do app.js', html.indexOf('gemini.js') < html.indexOf('app.js'));
-    for (const f of ['/app.js', '/gemini.js', '/style.css', '/manifest.json', '/sw.js', '/icon-192.png', '/icon-512.png']) {
+    for (const f of ['/app.js', '/gemini.js', '/style.css', '/manifest.json', '/sw.js', '/icon-192.png', '/icon-512.png', '/marca.svg']) {
       confere(`${f} existe`, (await fetch(base + f)).ok);
     }
     const sw = fs.readFileSync('public/sw.js', 'utf8');

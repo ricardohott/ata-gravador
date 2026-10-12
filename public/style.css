@@ -1,7 +1,11 @@
+/* Cores da marca Elevatis: fundo azul-noite e degradê azul do símbolo */
 :root {
-  --fundo: #111418;
-  --cartao: #1b2027;
-  --linha: #2a313b;
+  --fundo: #0e1522;
+  --cartao: #161f30;
+  --linha: #25314a;
+  --marca-1: #0f6fe5;
+  --marca-2: #19b6ea;
+  --degrade: linear-gradient(90deg, var(--marca-1), var(--marca-2));
   --texto: #eef1f5;
   --suave: #9aa4b2;
   --vermelho: #ef4444;
@@ -23,8 +27,13 @@ body {
 .tela { min-height: 100dvh; }
 .centro { min-height: 90dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; }
 
-.marca { font-weight: 800; font-size: 34px; letter-spacing: -.02em; }
-.marca.pequena { font-size: 20px; }
+/* ATA (azul, no degradê do símbolo) + ELEVATIS (branco), como na logo */
+.marca { display: inline-flex; align-items: center; gap: 10px; font: 800 30px/1 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; letter-spacing: .02em; }
+.marca img { height: 1.15em; width: auto; }
+.marca .ata { background: var(--degrade); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.marca .elevatis { color: #fff; margin-left: -4px; }
+.topo .marca { font-size: 22px; gap: 8px; }
+.marca.pequena { font-size: 17px; }
 .sub, .dica, .vazio { color: var(--suave); margin: 0; }
 .erro { color: #fca5a5; margin: 0; }
 .pequeno { font-size: 13px; }
@@ -43,7 +52,7 @@ textarea { resize: none; max-width: 340px; }
 
 .btn { border: 0; border-radius: 12px; padding: 14px 20px; font: 600 16px system-ui, sans-serif; cursor: pointer; color: var(--texto); }
 .btn:disabled { opacity: .5; }
-.primario { background: var(--azul); color: #0b1220; }
+.primario { background: var(--degrade); color: #fff; }
 .secundario { background: var(--cartao); border: 1px solid var(--linha); }
 .perigo { background: var(--vermelho); color: #fff; }
 .btn-icone { background: none; border: 0; color: var(--texto); font-size: 28px; width: 44px; height: 44px; cursor: pointer; }

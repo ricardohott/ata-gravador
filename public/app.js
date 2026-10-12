@@ -1,4 +1,4 @@
-// Ata — gravador de reuniões presenciais.
+// ATA Elevatis — gravador de reuniões presenciais.
 //
 // Como a gravação funciona:
 // - O áudio é cortado em pedaços de 15 min. Cada pedaço é um arquivo completo e

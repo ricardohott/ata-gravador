@@ -1,4 +1,4 @@
-# Ata — gravador de reuniões
+# ATA Elevatis — gravador de reuniões
 
 App de celular (PWA) que grava reuniões presenciais, transcreve e escreve a ata com o Gemini (plano gratuito).
 

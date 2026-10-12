@@ -1,11 +1,11 @@
 {
-  "name": "Ata — gravador de reuniões",
-  "short_name": "Ata",
+  "name": "ATA Elevatis",
+  "short_name": "ATA Elevatis",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#111418",
-  "theme_color": "#111418",
+  "background_color": "#0e1522",
+  "theme_color": "#0e1522",
   "lang": "pt-BR",
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },

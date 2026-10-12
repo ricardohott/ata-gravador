@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#111418">
+  <meta name="theme-color" content="#0e1522">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <title>Ata — gravador de reuniões</title>
+  <title>ATA Elevatis — gravador de reuniões</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-192.png">
@@ -16,7 +16,7 @@
   <!-- Chave do Gemini: pedida uma vez, fica só neste celular -->
   <section id="tela-entrar" class="tela" hidden>
     <div class="centro">
-      <div class="marca">Ata</div>
+      <div class="marca"><img src="marca.svg" alt=""><span class="ata">ATA</span><span class="elevatis">ELEVATIS</span></div>
       <p class="sub">Grave a reunião. Receba a ata pronta.</p>
       <form id="form-entrar">
         <ol class="passos">
@@ -35,7 +35,7 @@
 
   <!-- Início: botão de gravar + reuniões anteriores -->
   <section id="tela-inicio" class="tela" hidden>
-    <header class="topo"><div class="marca">Ata</div><button id="btn-ajustes" class="btn-icone" aria-label="Ajustes">⚙</button></header>
+    <header class="topo"><div class="marca"><img src="marca.svg" alt=""><span class="ata">ATA</span><span class="elevatis">ELEVATIS</span></div><button id="btn-ajustes" class="btn-icone" aria-label="Ajustes">⚙</button></header>
     <div class="area-gravar">
       <button id="btn-gravar" class="btn-gravar" aria-label="Começar a gravar">
         <span class="ponto"></span>
@@ -67,7 +67,7 @@
   <section id="tela-detalhe" class="tela" hidden>
     <header class="topo">
       <button id="btn-voltar" class="btn-icone" aria-label="Voltar">‹</button>
-      <div class="marca pequena">Ata</div>
+      <div class="marca pequena"><img src="marca.svg" alt=""><span class="ata">ATA</span><span class="elevatis">ELEVATIS</span></div>
       <button id="btn-compartilhar" class="btn-icone" aria-label="Compartilhar">⇪</button>
     </header>
     <div id="detalhe" class="detalhe"></div>
