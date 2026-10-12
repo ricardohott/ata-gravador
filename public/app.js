@@ -642,7 +642,27 @@ async function iniciar() {
   }
   await renderLista();
   mostrar('inicio');
+  retomarPassageiras();
 }
+
+// Falhas passageiras (Google sobrecarregado, sem internet) tentam de novo sozinhas
+// quando a internet volta ou o app volta para a tela — sem precisar tocar em nada.
+let retomando = false;
+async function retomarPassageiras() {
+  if (retomando || !chaveGemini() || gravacao.rec) return;
+  retomando = true;
+  try {
+    for (const r of await todasReunioes()) {
+      // A segunda condição pega erros 5xx gravados por versões antigas do app, sem o tipo.
+      const passageira = ['ocupado', 'rede'].includes(r.erroTipo) || /\(5\d\d\)/.test(r.erro || '');
+      if (r.status === 'erro' && passageira && r.segmentos.length) await processar(r.id);
+    }
+  } finally {
+    retomando = false;
+  }
+}
+window.addEventListener('online', retomarPassageiras);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') retomarPassageiras(); });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 navigator.storage?.persist?.(); // pede ao navegador para não apagar as gravações quando faltar espaço

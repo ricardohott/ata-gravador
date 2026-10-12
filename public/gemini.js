@@ -117,6 +117,9 @@ async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
   if ((r.status === 400 && /API key|API_KEY/i.test(msg)) || r.status === 401 || r.status === 403) {
     throw new ErroGemini('A chave do Gemini não foi aceita. Confira a chave em Ajustes.', 'chave');
   }
+  if (r.status >= 500) {
+    throw new ErroGemini('O Gemini está sobrecarregado agora (problema do lado do Google). A gravação está salva e o app tenta de novo sozinho.', 'ocupado');
+  }
   if (r.status === 404) {
     localStorage.removeItem('ata-modelo'); // o modelo saiu do ar: a próxima tentativa escolhe outro
     throw new ErroGemini('O modelo do Gemini mudou de nome. Toque em "Tentar de novo".', 'modelo');
@@ -124,17 +127,71 @@ async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
   throw new ErroGemini(`O Gemini recusou o pedido (${r.status}). ${msg}`.trim(), 'outro');
 }
 
-// Prefere o apelido "flash-latest" (sempre o Flash atual); senão, o Flash mais novo da lista.
-async function escolherModelo(chave) {
+// Modelos que servem, em ordem de preferência: o apelido "flash-latest" (sempre o Flash atual),
+// os Flash numerados do mais novo ao mais velho e, por último, os Flash-Lite.
+// Os de reserva entram quando o primeiro está sobrecarregado.
+async function listarModelos(chave = chaveGemini()) {
   const { models = [] } = await chamarGemini('models?pageSize=200', null, chave);
   const nomes = models
     .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
     .map((m) => m.name.replace(/^models\//, ''));
-  if (nomes.includes('gemini-flash-latest')) return 'gemini-flash-latest';
-  const flash = nomes
-    .filter((n) => /^gemini-[\d.]+-flash$/.test(n))
-    .sort((a, b) => parseFloat(b.slice(7)) - parseFloat(a.slice(7)));
-  return flash[0] || nomes.find((n) => /flash/.test(n) && !/lite|image|tts|live|audio/.test(n)) || 'gemini-flash-latest';
+  const versao = (n) => parseFloat(n.replace(/^gemini-/, '')) || 0;
+  const porVersao = (re) => nomes.filter((n) => re.test(n)).sort((a, b) => versao(b) - versao(a));
+  const ordem = [
+    ...nomes.filter((n) => n === 'gemini-flash-latest'),
+    ...porVersao(/^gemini-[\d.]+-flash$/),
+    ...nomes.filter((n) => n === 'gemini-flash-lite-latest'),
+    ...porVersao(/^gemini-[\d.]+-flash-lite$/),
+  ];
+  return ordem.length ? ordem : ['gemini-flash-latest'];
+}
+
+async function escolherModelo(chave) {
+  const modelos = await listarModelos(chave);
+  localStorage.setItem('ata-reservas', JSON.stringify(modelos.slice(1, 3)));
+  return modelos[0];
+}
+
+async function modelosReserva() {
+  try {
+    const salvos = JSON.parse(localStorage.getItem('ata-reservas') || 'null');
+    if (Array.isArray(salvos)) return salvos;
+  } catch { /* lista corrompida: busca de novo */ }
+  try {
+    const reservas = (await listarModelos()).filter((m) => m !== modeloGemini()).slice(0, 2);
+    localStorage.setItem('ata-reservas', JSON.stringify(reservas));
+    return reservas;
+  } catch {
+    return [];
+  }
+}
+
+const esperar = (ms) => new Promise((ok) => setTimeout(ok, ms));
+
+// Sobrecarga do Google (503) costuma passar em segundos: tenta de novo com espera crescente
+// e, se o modelo continuar ocupado, passa para um modelo de reserva. Outros erros saem na hora.
+// Modelo que acabou de dar "ocupado" vai para o fim da fila por 2 min,
+// para a etapa seguinte (ex.: a ata depois da transcrição) não esperar por ele de novo.
+const ocupadoAte = {};
+
+async function gerar(corpo) {
+  const todos = [modeloGemini(), ...(await modelosReserva())];
+  const livre = (m) => !(ocupadoAte[m] > Date.now());
+  const modelos = [...todos.filter(livre), ...todos.filter((m) => !livre(m))];
+  let ultimo;
+  for (const modelo of modelos) {
+    for (const espera of [0, 3000, 8000]) {
+      if (espera) await esperar(espera);
+      try {
+        return await chamarGemini(`models/${modelo}:generateContent`, corpo);
+      } catch (e) {
+        if (e.tipo !== 'ocupado') throw e;
+        ultimo = e;
+      }
+    }
+    ocupadoAte[modelo] = Date.now() + 2 * 60 * 1000;
+  }
+  throw ultimo;
 }
 
 function textoDaResposta(dados) {
@@ -162,7 +219,7 @@ async function transcreverAudio(blob, mime, anterior, maiorNumero) {
 Mantenha a numeração: quem continua o assunto acima provavelmente é a mesma pessoa.
 Uma voz que ainda não apareceu recebe o próximo número livre (a partir de ${maiorNumero + 1}).`;
   }
-  const dados = await chamarGemini(`models/${modeloGemini()}:generateContent`, {
+  const dados = await gerar({
     contents: [{
       role: 'user',
       parts: [{ inlineData: { mimeType: (mime || 'audio/webm').split(';')[0], data: await blobParaBase64(blob) } }, { text: pedido }],
@@ -195,7 +252,7 @@ async function escreverAta({ transcricao, inicio, duracaoSeg, contexto }) {
     duracaoSeg && `Duração: ${Math.max(1, Math.round(duracaoSeg / 60))} min`,
     contexto && `Anotação de quem gravou: ${contexto}`,
   ].filter(Boolean).join('\n');
-  const dados = await chamarGemini(`models/${modeloGemini()}:generateContent`, {
+  const dados = await gerar({
     systemInstruction: { parts: [{ text: PEDIDO_ATA }] },
     contents: [{ role: 'user', parts: [{ text: `${cabecalho}\n\n<transcricao>\n${transcricao}\n</transcricao>` }] }],
     generationConfig: { responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_ATA },
