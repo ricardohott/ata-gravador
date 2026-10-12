@@ -459,17 +459,18 @@ function textoParaCompartilhar(r, formato = 'whats') {
   const s = r.resumo;
   if (!s) return r.transcricao || '';
   const titulo = (t) => (formato === 'whats' ? `*${t}*` : t.toUpperCase());
-  const itens = (arr) => (arr || []).map((i) => `• ${i}`).join('\n');
-  const secao = (nome, arr) => arr?.length && `\n${titulo(nome)}\n${itens(arr)}`;
-  return [
+  // Toda parte sai com título, mesmo vazia: a ata fica sempre com a mesma divisão.
+  const secao = (nome, arr, vazio) => `\n${titulo(nome)}\n${arr?.length ? arr.map((i) => `• ${i}`).join('\n') : vazio}`;
+  const partes = [
     titulo(s.titulo), `${fmtData(r.inicio)} · ${fmtDuracao(r.duracaoSeg)}`,
-    s.participantes?.length && `Participantes: ${s.participantes.join(', ')}`,
-    '', s.resumo,
-    secao('Decisões', s.decisoes),
-    secao('Tarefas', s.tarefas?.map((t) => [t.descricao, t.responsavel, t.prazo].filter(Boolean).join(' — '))),
-    secao('Próximos passos', s.proximos_passos),
-    ...(s.topicos || []).map((t) => secao(t.titulo, t.pontos)),
-  ].filter((x) => x !== false && x != null && x !== undefined).join('\n');
+    s.participantes?.length ? `Participantes: ${s.participantes.join(', ')}` : null,
+    `\n${titulo('Resumo')}\n${s.resumo}`,
+    secao('Decisões', s.decisoes, 'Nenhuma decisão registrada.'),
+    secao('Tarefas', s.tarefas?.map((t) => [t.descricao, t.responsavel, t.prazo].filter(Boolean).join(' — ')), 'Nenhuma tarefa registrada.'),
+    secao('Próximos passos', s.proximos_passos, 'Nenhum próximo passo registrado.'),
+    ...(s.topicos || []).filter((t) => t.pontos?.length).map((t) => secao(t.titulo, t.pontos, '')),
+  ];
+  return partes.filter((x) => typeof x === 'string').join('\n');
 }
 
 async function copiarAta() {
