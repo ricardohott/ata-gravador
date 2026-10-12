@@ -97,22 +97,39 @@ class ErroGemini extends Error {
   constructor(msg, tipo) { super(msg); this.tipo = tipo; }
 }
 
+// Prazo máximo por pedido: 15 min de áudio costumam levar menos de 1 min no Gemini.
+// Sem prazo, uma conexão que fica pendurada deixaria "Transcrevendo" para sempre.
+const PRAZO_GERAR_MS = 4 * 60 * 1000;
+const PRAZO_LISTAR_MS = 20 * 1000;
+
 async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
-  let r;
+  const controle = new AbortController();
+  const prazo = setTimeout(() => controle.abort(), corpo ? PRAZO_GERAR_MS : PRAZO_LISTAR_MS);
+  let r, dados;
   try {
     r = await fetch(`${GEMINI}/${caminho}`, {
       method: corpo ? 'POST' : 'GET',
       headers: { 'x-goog-api-key': chave, ...(corpo ? { 'Content-Type': 'application/json' } : {}) },
       body: corpo ? JSON.stringify(corpo) : undefined,
+      signal: controle.signal,
     });
-  } catch {
-    throw new ErroGemini('Sem internet agora. A gravação está salva no celular; tente de novo depois.', 'rede');
+    dados = await r.json().catch(() => ({}));
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new ErroGemini('O Gemini demorou demais para responder. A gravação está salva e o app tenta de novo sozinho.', 'ocupado');
+    }
+    throw new ErroGemini('Sem internet agora. A gravação está salva no celular; o app tenta de novo quando a internet voltar.', 'rede');
+  } finally {
+    clearTimeout(prazo);
   }
-  const dados = await r.json().catch(() => ({}));
   if (r.ok) return dados;
   const msg = dados.error?.message || '';
   if (r.status === 429) {
-    throw new ErroGemini('O limite gratuito do Gemini foi atingido por agora. A gravação está salva; tente de novo mais tarde (o limite diário renova todo dia).', 'limite');
+    // Limite por minuto passa sozinho em segundos; o diário só no dia seguinte.
+    if (/per.?day|daily|diári/i.test(msg)) {
+      throw new ErroGemini('O limite gratuito diário do Gemini acabou. A gravação está salva; o limite renova amanhã e o app refaz a ata quando você abrir.', 'limite');
+    }
+    throw new ErroGemini('Muitos pedidos ao Gemini em pouco tempo. O app espera um pouco e tenta de novo.', 'minuto');
   }
   if ((r.status === 400 && /API key|API_KEY/i.test(msg)) || r.status === 401 || r.status === 403) {
     throw new ErroGemini('A chave do Gemini não foi aceita. Confira a chave em Ajustes.', 'chave');
@@ -185,8 +202,10 @@ async function gerar(corpo) {
       try {
         return await chamarGemini(`models/${modelo}:generateContent`, corpo);
       } catch (e) {
-        if (e.tipo !== 'ocupado') throw e;
         ultimo = e;
+        if (e.tipo === 'minuto') { await esperar(30000); continue; } // limite por minuto: espera e repete
+        if (e.tipo === 'modelo') break;                              // modelo saiu do ar: vai para o próximo
+        if (e.tipo !== 'ocupado') throw e;
       }
     }
     ocupadoAte[modelo] = Date.now() + 2 * 60 * 1000;
@@ -197,6 +216,7 @@ async function gerar(corpo) {
 function textoDaResposta(dados) {
   const c = dados.candidates?.[0];
   if (!c) throw new ErroGemini('O Gemini não devolveu resposta para este trecho.', 'outro');
+  if (c.finishReason === 'MAX_TOKENS') throw new ErroGemini('A resposta do Gemini veio cortada por ser longa demais.', 'outro');
   return (c.content?.parts || []).map((p) => p.text || '').join('').trim();
 }
 
@@ -224,7 +244,7 @@ Uma voz que ainda não apareceu recebe o próximo número livre (a partir de ${m
       role: 'user',
       parts: [{ inlineData: { mimeType: (mime || 'audio/webm').split(';')[0], data: await blobParaBase64(blob) } }, { text: pedido }],
     }],
-    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_FALAS },
+    generationConfig: { temperature: 0, maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_FALAS },
   });
   let falas;
   try {
@@ -255,7 +275,7 @@ async function escreverAta({ transcricao, inicio, duracaoSeg, contexto }) {
   const dados = await gerar({
     systemInstruction: { parts: [{ text: PEDIDO_ATA }] },
     contents: [{ role: 'user', parts: [{ text: `${cabecalho}\n\n<transcricao>\n${transcricao}\n</transcricao>` }] }],
-    generationConfig: { responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_ATA },
+    generationConfig: { maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_ATA },
   });
   try {
     return JSON.parse(textoDaResposta(dados));

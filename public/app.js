@@ -1,29 +1,52 @@
 // ATA Elevatis — gravador de reuniões presenciais.
 //
 // Como a gravação funciona:
-// - O áudio é cortado em pedaços de 15 min. Cada pedaço é um arquivo completo e
-//   independente, então dá para transcrever enquanto a reunião continua e o resumo
-//   sai poucos segundos depois de encerrar.
-// - Tudo vai para o IndexedDB do celular a cada 10 s. Se o app fechar no meio,
-//   o que foi gravado até ali é recuperado na próxima abertura.
+// - O áudio é cortado em partes de 15 min. Cada parte é um arquivo completo e
+//   independente, então dá para transcrever enquanto a reunião continua e a ata
+//   sai pouco depois de encerrar — também em reuniões de várias horas.
+// - A cada 10 s o navegador entrega um bloco novo de áudio, que vai na hora para o
+//   IndexedDB do celular como registro próprio (só o bloco novo, nunca a parte
+//   inteira de novo). Se o app fechar no meio, o que foi gravado é recuperado.
+// - Nenhuma espera é sem fim: parar o gravador, salvar e chamar o Gemini têm prazo.
+//   Um celular que não responde nunca deixa a tela travada.
 
 'use strict';
 
 // 15 min: cada corte é um ponto onde a numeração de quem fala pode se perder,
 // então menos cortes = menos trocas. 15 min a 32 kbps ≈ 3,6 MB, bem abaixo do limite do Gemini.
 const PEDACO_MS = 15 * 60 * 1000;
-const SALVAR_MS = 10 * 1000;
+const BLOCO_MS = 10 * 1000;
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const esperarMs = (ms) => new Promise((ok) => setTimeout(ok, ms));
+// Espera a promessa até `ms`; depois disso segue em frente (devolve `nada`) em vez de travar.
+const comPrazo = (promessa, ms, nada) => Promise.race([promessa, esperarMs(ms).then(() => nada)]);
+
+// ---------- diagnóstico ----------
+// Últimos acontecimentos, guardados no celular. Em Ajustes → "Copiar relatório",
+// para mandar a quem for consertar quando algo der errado. Não guarda áudio nem texto.
+
+const DIAG_MAX = 120;
+function registrar(evento) {
+  try {
+    const linhas = JSON.parse(localStorage.getItem('ata-diagnostico') || '[]');
+    linhas.push(`${new Date().toISOString().slice(5, 19).replace('T', ' ')} ${evento}`);
+    localStorage.setItem('ata-diagnostico', JSON.stringify(linhas.slice(-DIAG_MAX)));
+  } catch { /* diagnóstico nunca pode atrapalhar o app */ }
+}
+window.addEventListener('error', (e) => registrar(`ERRO ${e.message} @${e.lineno}`));
+window.addEventListener('unhandledrejection', (e) => registrar(`ERRO promessa ${e.reason?.message || e.reason}`));
 
 // ---------- banco local (IndexedDB) ----------
+// audios: chave "<id>:<parte>:<bloco>" -> { blob, mime }, um registro por bloco de 10 s.
+// (Gravações antigas têm um registro só por parte, chave "<id>:<parte>" — ainda são lidas.)
 
 const banco = new Promise((ok, falha) => {
   const r = indexedDB.open('ata', 1);
   r.onupgradeneeded = () => {
     r.result.createObjectStore('reunioes', { keyPath: 'id' });
-    r.result.createObjectStore('audios'); // chave "<id>:<n>" -> { blob, mime }
+    r.result.createObjectStore('audios');
   };
   r.onsuccess = () => ok(r.result);
   r.onerror = () => falha(r.error);
@@ -36,17 +59,30 @@ async function bd(store, modo, fn) {
     const req = fn(tx.objectStore(store));
     tx.oncomplete = () => ok(req && req.result);
     tx.onerror = () => falha(tx.error);
+    // Celular sem espaço aborta a transação; sem isto a promessa nunca terminaria.
+    tx.onabort = () => falha(tx.error || new Error('Gravação no celular interrompida (sem espaço?)'));
   });
 }
 const lerReuniao = (id) => bd('reunioes', 'readonly', (s) => s.get(id));
 const salvarReuniao = (r) => bd('reunioes', 'readwrite', (s) => s.put(r));
 const todasReunioes = () => bd('reunioes', 'readonly', (s) => s.getAll());
-const lerAudio = (id, n) => bd('audios', 'readonly', (s) => s.get(`${id}:${n}`));
-const salvarAudio = (id, n, blob, mime) => bd('audios', 'readwrite', (s) => s.put({ blob, mime }, `${id}:${n}`));
+const faixa = (prefixo) => IDBKeyRange.bound(prefixo, prefixo + '￿');
+const chaveBloco = (id, n, k) => `${id}:${n}:${String(k).padStart(6, '0')}`;
+const salvarBloco = (id, n, k, blob, mime) => bd('audios', 'readwrite', (s) => s.put({ blob, mime }, chaveBloco(id, n, k)));
+
+// Junta os blocos de uma parte num arquivo só (ou devolve o registro único do formato antigo).
+async function lerAudio(id, n) {
+  const antigo = await bd('audios', 'readonly', (s) => s.get(`${id}:${n}`));
+  if (antigo) return antigo;
+  const blocos = await bd('audios', 'readonly', (s) => s.getAll(faixa(`${id}:${n}:`)));
+  if (!blocos?.length) return null;
+  const mime = blocos[0].mime;
+  return { blob: new Blob(blocos.map((b) => b.blob), { type: mime }), mime };
+}
 
 async function apagarReuniao(r) {
   await bd('reunioes', 'readwrite', (s) => s.delete(r.id));
-  await bd('audios', 'readwrite', (s) => { for (const p of r.segmentos) s.delete(`${r.id}:${p.n}`); });
+  await bd('audios', 'readwrite', (s) => s.delete(faixa(`${r.id}:`)));
 }
 
 // ---------- telas ----------
@@ -92,9 +128,10 @@ $('#lista').addEventListener('click', (e) => {
 // ---------- gravação ----------
 
 const gravacao = {
-  reuniao: null, stream: null, rec: null, mime: '', pedacos: [], n: 0,
-  acumuladoMs: 0, desde: 0, pausado: false, tCorte: null, tRelogio: null, tSalvar: null,
-  wakeLock: null, audioCtx: null, encerrando: false,
+  reuniao: null, stream: null, rec: null, mime: '', n: 0,
+  acumuladoMs: 0, desde: 0, pausado: false, encerrando: false, trocando: false, micPerdido: false,
+  tCorte: null, tRelogio: null, restanteCorte: PEDACO_MS,
+  wakeLock: null, audioCtx: null, escrita: Promise.resolve(),
 };
 
 function escolherMime() {
@@ -106,13 +143,32 @@ function escolherMime() {
 
 const decorridoMs = () => gravacao.acumuladoMs + (gravacao.pausado || !gravacao.desde ? 0 : Date.now() - gravacao.desde);
 
+function estadoGravacao(tipo, texto) {
+  $('#estado-gravacao').className = `estado ${tipo}`;
+  $('#estado-gravacao').innerHTML = `<span class="pulso"></span> ${esc(texto)}`;
+}
+
 async function manterTelaLigada() {
   try { gravacao.wakeLock = await navigator.wakeLock?.request('screen'); }
   catch { /* sem suporte: o aviso na tela já pede para manter aberto */ }
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && gravacao.rec) manterTelaLigada();
+  if (!gravacao.reuniao) return;
+  registrar(`tela ${document.visibilityState}`);
+  if (document.visibilityState === 'visible') manterTelaLigada();
 });
+
+// Sem cancelamento de eco: ele foi feito para chamada e abafa quem fala longe do celular.
+const pedirMicrofone = () => navigator.mediaDevices.getUserMedia({
+  audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true },
+});
+
+function prepararMicrofone(stream) {
+  gravacao.stream = stream;
+  // Ligação, outro app ou o sistema podem tomar o microfone: a faixa termina sozinha.
+  for (const t of stream.getAudioTracks()) t.addEventListener('ended', () => microfoneCaiu('o microfone foi desligado'));
+  ligarMedidor();
+}
 
 async function comecar() {
   $('#aviso-mic').hidden = true;
@@ -121,152 +177,253 @@ async function comecar() {
     $('#aviso-mic').hidden = false;
     return;
   }
+  if (gravacao.reuniao) return; // toque duplo
+  let stream;
   try {
-    // Sem cancelamento de eco: ele foi feito para chamada e abafa quem fala longe do celular.
-    gravacao.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true },
-    });
-  } catch {
+    stream = await pedirMicrofone();
+  } catch (e) {
+    registrar(`ERRO microfone negado: ${e.name}`);
     $('#aviso-mic').textContent = 'Sem acesso ao microfone. Libere a permissão nas configurações do navegador e tente de novo.';
     $('#aviso-mic').hidden = false;
     return;
   }
 
-  gravacao.mime = escolherMime();
-  gravacao.reuniao = {
+  const g = gravacao;
+  g.mime = escolherMime();
+  g.reuniao = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     inicio: new Date().toISOString(), duracaoSeg: 0, status: 'gravando',
     contexto: '', segmentos: [], transcricao: '', resumo: null, erro: '',
   };
-  Object.assign(gravacao, { n: 0, acumuladoMs: 0, desde: Date.now(), pausado: false, encerrando: false });
-  await salvarReuniao(gravacao.reuniao);
+  Object.assign(g, {
+    n: 0, acumuladoMs: 0, desde: Date.now(), pausado: false, encerrando: false,
+    trocando: false, micPerdido: false, escrita: Promise.resolve(),
+  });
+  registrar(`gravação ${g.reuniao.id} começou (${g.mime || 'formato padrão'}) ${navigator.userAgent.slice(0, 120)}`);
 
   $('#contexto').value = '';
   $('#btn-pausar').textContent = 'Pausar';
-  $('#estado-gravacao').className = 'estado';
-  $('#estado-gravacao').innerHTML = '<span class="pulso"></span> Gravando';
+  $('#btn-parar').textContent = 'Encerrar';
+  $('#btn-parar').disabled = false;
+  estadoGravacao('', 'Gravando');
+  $('#cronometro').textContent = '00:00';
   mostrar('gravando');
 
-  iniciarPedaco();
+  try {
+    await salvarReuniao(g.reuniao);
+    prepararMicrofone(stream);
+    iniciarPedaco();
+  } catch (e) {
+    registrar(`ERRO ao começar: ${e.message}`);
+    stream.getTracks().forEach((t) => t.stop());
+    g.reuniao = null;
+    mostrar('inicio');
+    $('#aviso-mic').textContent = `Não consegui começar a gravar (${e.message}). Tente de novo.`;
+    $('#aviso-mic').hidden = false;
+    return;
+  }
   manterTelaLigada();
-  desenharNivel();
-  gravacao.tRelogio = setInterval(() => { $('#cronometro').textContent = fmtDuracao(decorridoMs() / 1000); }, 250);
-  gravacao.tSalvar = setInterval(salvarParcial, SALVAR_MS);
+  g.tRelogio = setInterval(() => { $('#cronometro').textContent = fmtDuracao(decorridoMs() / 1000); }, 250);
 }
 
 function iniciarPedaco() {
-  const rec = new MediaRecorder(gravacao.stream, { ...(gravacao.mime ? { mimeType: gravacao.mime } : {}), audioBitsPerSecond: 32000 });
-  const n = gravacao.n;
-  const pedacos = [];
-  gravacao.rec = rec;
-  gravacao.pedacos = pedacos;
-  rec.ondataavailable = (e) => { if (e.data && e.data.size) pedacos.push(e.data); };
-  rec.onstop = () => { gravacao.fechando = fecharPedaco(n, pedacos, rec.mimeType || gravacao.mime); };
-  rec.start(SALVAR_MS);
-  // Corta a cada 15 min de gravação efetiva (pausa não conta).
-  clearTimeout(gravacao.tCorte);
-  gravacao.tCorte = setTimeout(cortarPedaco, PEDACO_MS);
+  const g = gravacao;
+  const r = g.reuniao;
+  const n = g.n;
+  const rec = new MediaRecorder(g.stream, { ...(g.mime ? { mimeType: g.mime } : {}), audioBitsPerSecond: 32000 });
+  const mime = rec.mimeType || g.mime || 'audio/webm';
+  let k = 0;
+  if (!r.segmentos.some((p) => p.n === n)) r.segmentos.push({ n, mime, texto: null });
+
+  // Cada bloco de 10 s vai direto para o celular, numa fila: salvar nunca atropela salvar.
+  rec.ondataavailable = (e) => {
+    if (!e.data || !e.data.size) return;
+    const bloco = k++;
+    g.escrita = g.escrita
+      .then(() => salvarBloco(r.id, n, bloco, e.data, mime))
+      .then(() => {
+        r.duracaoSeg = decorridoMs() / 1000;
+        if (g.reuniao === r) r.contexto = $('#contexto').value.trim();
+        return salvarReuniao(r);
+      })
+      .catch((err) => {
+        registrar(`ERRO ao salvar bloco ${n}.${bloco}: ${err.message}`);
+        avisar('Não consegui salvar parte do áudio no celular. Confira se há espaço livre.', 6000);
+      });
+  };
+  rec.onerror = (e) => {
+    registrar(`ERRO do gravador: ${e.error?.name || ''} ${e.error?.message || ''}`);
+    microfoneCaiu('o gravador parou com erro');
+  };
+  rec.start(BLOCO_MS);
+  g.rec = rec;
+  registrar(`parte ${n} gravando`);
+  clearTimeout(g.tCorte);
+  g.tCorte = setTimeout(cortarPedaco, PEDACO_MS);
 }
 
-function cortarPedaco() {
-  if (!gravacao.rec || gravacao.encerrando) return;
-  const antigo = gravacao.rec;
-  gravacao.n += 1;
-  iniciarPedaco(); // o novo começa antes de o antigo parar: nenhum som se perde no corte
-  antigo.stop();
+// Para um gravador e espera os últimos dados — no máximo `ms`. Devolve se ele confirmou.
+function pararGravador(rec, ms = 4000) {
+  if (!rec || rec.state === 'inactive') return Promise.resolve(true);
+  const parou = new Promise((ok) => rec.addEventListener('stop', () => ok(true), { once: true }));
+  try { rec.stop(); } catch (e) { registrar(`ERRO ao parar o gravador: ${e.message}`); return Promise.resolve(false); }
+  return comPrazo(parou, ms, false);
 }
 
-async function salvarParcial() {
-  const r = gravacao.reuniao;
-  if (!r || !gravacao.pedacos.length) return;
-  const n = gravacao.n;
-  await salvarAudio(r.id, n, new Blob(gravacao.pedacos, { type: gravacao.mime }), gravacao.mime);
-  if (!r.segmentos.some((p) => p.n === n)) r.segmentos.push({ n, mime: gravacao.mime, texto: null });
-  r.duracaoSeg = decorridoMs() / 1000;
-  r.contexto = $('#contexto').value.trim();
-  await salvarReuniao(r);
+// Fecha a parte em gravação: para o gravador, espera os blocos irem para o banco e marca a parte.
+// Tudo com prazo: se o celular não responder, segue com o que já foi salvo.
+async function fecharParteAtual() {
+  const g = gravacao;
+  const rec = g.rec;
+  g.rec = null;
+  clearTimeout(g.tCorte);
+  if (!(await pararGravador(rec))) registrar('gravador não confirmou a parada em 4 s; seguindo com o que foi salvo');
+  if ((await comPrazo(g.escrita.then(() => true), 6000, false)) === false) registrar('salvamento demorou mais de 6 s; seguindo');
+  const seg = g.reuniao?.segmentos.find((p) => p.n === g.n);
+  if (seg) seg.fechado = true;
+  if (g.reuniao) await comPrazo(salvarReuniao(g.reuniao).catch((e) => registrar(`ERRO ${e.message}`)), 3000);
 }
 
-async function fecharPedaco(n, pedacos, mime) {
-  const r = gravacao.reuniao;
-  if (!r || !pedacos.length) return;
-  await salvarAudio(r.id, n, new Blob(pedacos, { type: mime }), mime);
-  const seg = r.segmentos.find((p) => p.n === n);
-  if (seg) { seg.mime = mime; seg.fechado = true; }
-  else r.segmentos.push({ n, mime, texto: null, fechado: true });
-  r.segmentos.sort((a, b) => a.n - b.n);
-  await salvarReuniao(r);
-  if (!gravacao.encerrando) transcreverPendentes(r.id).catch(() => { /* tenta de novo no fim */ });
+// A cada 15 min: fecha a parte atual, começa outra e já manda transcrever a que fechou.
+async function cortarPedaco() {
+  const g = gravacao;
+  if (!g.rec || g.encerrando || g.trocando || g.pausado) return;
+  g.trocando = true;
+  try {
+    await fecharParteAtual();
+    if (g.encerrando || !g.reuniao) return;
+    g.n += 1;
+    iniciarPedaco();
+    transcreverPendentes(g.reuniao.id).catch(() => { /* tenta de novo no fim */ });
+  } catch (e) {
+    registrar(`ERRO no corte: ${e.message}`);
+    microfoneCaiu('falha ao trocar de parte');
+  } finally {
+    g.trocando = false;
+  }
+}
+
+// Microfone tomado (ligação, outro app) ou gravador com erro: guarda o que tem e tenta voltar sozinho.
+async function microfoneCaiu(motivo) {
+  const g = gravacao;
+  if (!g.reuniao || g.encerrando || g.micPerdido) return;
+  g.micPerdido = true;
+  registrar(`microfone caiu: ${motivo}`);
+  estadoGravacao('pausado', 'Microfone interrompido — tentando retomar…');
+  if (!g.pausado) g.acumuladoMs += Date.now() - g.desde;
+  g.pausado = true;
+  await fecharParteAtual();
+  try { g.stream?.getTracks().forEach((t) => t.stop()); } catch { /* já parado */ }
+
+  for (let tentativa = 1; g.reuniao && !g.encerrando; tentativa++) {
+    try {
+      const stream = await comPrazo(pedirMicrofone(), 8000, null);
+      if (!stream) throw new Error('sem resposta em 8 s');
+      if (g.encerrando || !g.reuniao) { stream.getTracks().forEach((t) => t.stop()); return; }
+      prepararMicrofone(stream);
+      g.n += 1;
+      g.micPerdido = false; g.pausado = false; g.desde = Date.now();
+      iniciarPedaco();
+      $('#btn-pausar').textContent = 'Pausar';
+      estadoGravacao('', 'Gravando');
+      avisar('O microfone voltou. A gravação continua.');
+      registrar(`microfone retomado na tentativa ${tentativa}`);
+      transcreverPendentes(g.reuniao.id).catch(() => {});
+      return;
+    } catch (e) {
+      registrar(`tentativa ${tentativa} de retomar o microfone falhou: ${e.name || ''} ${e.message}`);
+      await esperarMs(3000);
+    }
+  }
 }
 
 function pausarOuRetomar() {
   const g = gravacao;
-  if (!g.rec) return;
-  if (g.pausado) {
-    g.rec.resume(); g.pausado = false; g.desde = Date.now();
-    g.tCorte = setTimeout(cortarPedaco, g.restanteCorte);
-    $('#btn-pausar').textContent = 'Pausar';
-    $('#estado-gravacao').className = 'estado';
-    $('#estado-gravacao').innerHTML = '<span class="pulso"></span> Gravando';
-  } else {
-    g.rec.pause(); g.acumuladoMs += Date.now() - g.desde; g.pausado = true;
-    clearTimeout(g.tCorte);
-    g.restanteCorte = PEDACO_MS - (g.acumuladoMs % PEDACO_MS);
-    $('#btn-pausar').textContent = 'Continuar';
-    $('#estado-gravacao').className = 'estado pausado';
-    $('#estado-gravacao').innerHTML = '<span class="pulso"></span> Pausado';
+  if (!g.rec || g.trocando || g.micPerdido || g.encerrando) return;
+  try {
+    if (g.pausado) {
+      g.rec.resume(); g.pausado = false; g.desde = Date.now();
+      g.tCorte = setTimeout(cortarPedaco, g.restanteCorte);
+      $('#btn-pausar').textContent = 'Pausar';
+      estadoGravacao('', 'Gravando');
+      registrar('retomado');
+    } else {
+      g.rec.pause(); g.acumuladoMs += Date.now() - g.desde; g.pausado = true;
+      clearTimeout(g.tCorte);
+      g.restanteCorte = Math.max(1000, PEDACO_MS - (g.acumuladoMs % PEDACO_MS));
+      $('#btn-pausar').textContent = 'Continuar';
+      estadoGravacao('pausado', 'Pausado');
+      registrar('pausado');
+    }
+  } catch (e) {
+    registrar(`ERRO ao pausar/retomar: ${e.message}`);
+    microfoneCaiu('falha ao pausar ou retomar');
   }
 }
 
+// Encerrar SEMPRE leva para a tela da reunião em poucos segundos, aconteça o que acontecer:
+// cada espera tem prazo e o final fica num `finally`.
 async function encerrar() {
   const g = gravacao;
-  if (!g.rec || g.encerrando) return;
+  if (!g.reuniao || g.encerrando) return;
   g.encerrando = true;
-  $('#btn-parar').disabled = true;
-  if (!g.pausado) g.acumuladoMs += Date.now() - g.desde;
-  g.pausado = true;
-  clearTimeout(g.tCorte); clearInterval(g.tRelogio); clearInterval(g.tSalvar);
-
-  const parou = new Promise((ok) => g.rec.addEventListener('stop', () => setTimeout(ok, 0), { once: true }));
-  g.rec.stop();
-  await parou;
-  await g.fechando; // o último pedaço precisa estar inteiro no banco antes de transcrever
-  g.stream.getTracks().forEach((t) => t.stop());
-  g.wakeLock?.release().catch(() => {});
-  g.audioCtx?.close().catch(() => {});
-
   const r = g.reuniao;
-  r.duracaoSeg = g.acumuladoMs / 1000;
-  r.contexto = $('#contexto').value.trim();
-  r.status = 'processando';
-  await salvarReuniao(r);
-  Object.assign(g, { rec: null, stream: null, reuniao: null, wakeLock: null, audioCtx: null });
-  $('#btn-parar').disabled = false;
-
-  abrirDetalhe(r.id);
-  processar(r.id);
+  const botao = $('#btn-parar');
+  botao.disabled = true; botao.textContent = 'Salvando…';
+  registrar('encerrar tocado');
+  try {
+    if (!g.pausado) g.acumuladoMs += Date.now() - g.desde;
+    g.pausado = true;
+    clearTimeout(g.tCorte); clearInterval(g.tRelogio);
+    await fecharParteAtual();
+  } catch (e) {
+    registrar(`ERRO ao encerrar: ${e.message}`);
+  } finally {
+    try { g.stream?.getTracks().forEach((t) => t.stop()); } catch { /* já parado */ }
+    // Desligar o microfone faz até um gravador "surdo" entregar o último bloco: espera ele ir para o banco.
+    await esperarMs(300);
+    await comPrazo(g.escrita, 3000);
+    g.wakeLock?.release?.().catch(() => {});
+    g.audioCtx?.close?.().catch(() => {});
+    r.duracaoSeg = g.acumuladoMs / 1000;
+    r.contexto = $('#contexto').value.trim();
+    for (const p of r.segmentos) p.fechado = true;
+    r.status = 'processando';
+    await comPrazo(salvarReuniao(r).catch((e) => registrar(`ERRO ao salvar no encerrar: ${e.message}`)), 4000);
+    Object.assign(g, { rec: null, stream: null, reuniao: null, wakeLock: null, audioCtx: null, micPerdido: false, trocando: false });
+    botao.disabled = false; botao.textContent = 'Encerrar';
+    registrar(`encerrado: ${fmtDuracao(r.duracaoSeg)}, ${r.segmentos.length} parte(s)`);
+    abrirDetalhe(r.id);
+    processar(r.id);
+  }
 }
 
-function desenharNivel() {
+// Barrinhas de volume. Religa sozinho quando o microfone é trocado.
+function ligarMedidor() {
   const canvas = $('#nivel');
-  const ctx2d = canvas.getContext('2d');
   try {
-    gravacao.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const analisador = gravacao.audioCtx.createAnalyser();
+    const g = gravacao;
+    g.audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
+    g.audioCtx.resume?.().catch(() => {});
+    const analisador = g.audioCtx.createAnalyser();
     analisador.fftSize = 512;
-    gravacao.audioCtx.createMediaStreamSource(gravacao.stream).connect(analisador);
+    g.audioCtx.createMediaStreamSource(g.stream).connect(analisador);
+    g.analisador = analisador;
+    if (g.medindo) return; // o laço de desenho já está rodando; só trocou a fonte
+    g.medindo = true;
+    const ctx2d = canvas.getContext('2d');
     const dados = new Uint8Array(analisador.fftSize);
     const barras = new Array(40).fill(0);
     const quadro = () => {
-      if (!gravacao.rec) return;
-      analisador.getByteTimeDomainData(dados);
+      if (!g.reuniao) { g.medindo = false; return; }
+      g.analisador.getByteTimeDomainData(dados);
       let soma = 0;
       for (const v of dados) soma += ((v - 128) / 128) ** 2;
-      const nivel = gravacao.pausado ? 0 : Math.min(1, Math.sqrt(soma / dados.length) * 4);
+      const nivel = g.pausado ? 0 : Math.min(1, Math.sqrt(soma / dados.length) * 4);
       barras.push(nivel); barras.shift();
       ctx2d.clearRect(0, 0, canvas.width, canvas.height);
       const w = canvas.width / barras.length;
-      ctx2d.fillStyle = gravacao.pausado ? '#f59e0b' : '#ef4444';
+      ctx2d.fillStyle = g.pausado ? '#f59e0b' : '#ef4444';
       barras.forEach((b, i) => {
         const h = Math.max(3, b * canvas.height);
         ctx2d.fillRect(i * w + 1, (canvas.height - h) / 2, w - 2, h);
@@ -274,7 +431,10 @@ function desenharNivel() {
       requestAnimationFrame(quadro);
     };
     quadro();
-  } catch { canvas.hidden = true; }
+  } catch (e) {
+    registrar(`medidor indisponível: ${e.message}`);
+    canvas.hidden = true;
+  }
 }
 
 // ---------- transcrição e resumo ----------
@@ -334,8 +494,20 @@ function transcreverPendentes(id) {
   });
 }
 
+// Uma reunião só é processada por vez: "Tentar de novo" tocado duas vezes, ou a retomada
+// automática chegando junto, não dobram as chamadas ao Gemini.
+const emProcesso = new Set();
+
 async function processar(id) {
+  if (emProcesso.has(id)) return;
+  emProcesso.add(id);
+  try { await processarAgora(id); } finally { emProcesso.delete(id); }
+}
+
+async function processarAgora(id) {
   let r = await lerReuniao(id);
+  if (!r) return;
+  registrar(`processando ${id}: ${r.segmentos.length} parte(s), ${fmtDuracao(r.duracaoSeg)}`);
   try {
     r.erro = ''; r.status = 'processando'; await salvarReuniao(r);
     if (telaAberta === id) renderDetalhe(r);
@@ -358,9 +530,11 @@ async function processar(id) {
     }
     r.transcricao = transcricaoComNomes(r);
     r.status = 'pronta';
+    registrar(`ata pronta ${id}`);
   } catch (e) {
     r = (await lerReuniao(id)) || r;
-    r.status = 'erro'; r.erro = e.message; r.erroTipo = e.tipo || '';
+    r.status = 'erro'; r.erro = e.message; r.erroTipo = e.tipo || ''; r.erroEm = Date.now();
+    registrar(`ERRO processando ${id}: [${r.erroTipo}] ${e.message}`);
   }
   await salvarReuniao(r);
   if (telaAberta === id) renderDetalhe(r);
@@ -593,16 +767,38 @@ $('#btn-parar').addEventListener('click', encerrar);
 $('#btn-voltar').addEventListener('click', voltar);
 
 // Fechar a aba no meio da gravação: o navegador pergunta antes.
-window.addEventListener('beforeunload', (e) => { if (gravacao.rec) { salvarParcial(); e.preventDefault(); } });
+// Fechar a aba no meio da gravação: pede o último bloco ao gravador e o navegador pergunta antes de sair.
+window.addEventListener('beforeunload', (e) => {
+  if (!gravacao.reuniao) return;
+  try { gravacao.rec?.requestData(); } catch { /* já parado */ }
+  e.preventDefault();
+});
 
 function abrirAjustes() {
   $('#chave').value = '';
   $('#erro-entrar').hidden = true;
   $('#btn-cancelar-chave').hidden = !chaveGemini();
+  $('#btn-diagnostico').hidden = !chaveGemini();
   mostrar('entrar');
 }
 $('#btn-ajustes').addEventListener('click', abrirAjustes);
 $('#btn-cancelar-chave').addEventListener('click', () => { renderLista(); mostrar('inicio'); });
+
+// Copia os últimos acontecimentos (sem áudio nem texto das reuniões) para mandar a quem for consertar.
+$('#btn-diagnostico').addEventListener('click', async () => {
+  let linhas = [];
+  try { linhas = JSON.parse(localStorage.getItem('ata-diagnostico') || '[]'); } catch { /* vazio */ }
+  const reunioes = (await todasReunioes()).sort((x, y) => y.inicio.localeCompare(x.inicio)).slice(0, 5)
+    .map((r) => `${r.id} ${r.status} ${fmtDuracao(r.duracaoSeg)} partes=${r.segmentos.length} ${r.erroTipo || ''} ${r.erro || ''}`.trim());
+  const relatorio = ['Relatório ATA Elevatis', navigator.userAgent, `modelo: ${modeloGemini()}`, '',
+    'Reuniões:', ...reunioes, '', 'Acontecimentos:', ...linhas].join('\n');
+  try {
+    await navigator.clipboard.writeText(relatorio);
+    avisar('Relatório copiado. Cole no WhatsApp para quem cuida do app.');
+  } catch {
+    avisar('Não consegui copiar o relatório neste celular.');
+  }
+});
 
 $('#form-entrar').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -649,12 +845,13 @@ async function iniciar() {
 // quando a internet volta ou o app volta para a tela — sem precisar tocar em nada.
 let retomando = false;
 async function retomarPassageiras() {
-  if (retomando || !chaveGemini() || gravacao.rec) return;
+  if (retomando || !chaveGemini() || gravacao.reuniao) return;
   retomando = true;
   try {
     for (const r of await todasReunioes()) {
       // A segunda condição pega erros 5xx gravados por versões antigas do app, sem o tipo.
-      const passageira = ['ocupado', 'rede'].includes(r.erroTipo) || /\(5\d\d\)/.test(r.erro || '');
+      const passageira = ['ocupado', 'rede', 'minuto'].includes(r.erroTipo) || /\(5\d\d\)/.test(r.erro || '')
+        || (r.erroTipo === 'limite' && Date.now() - (r.erroEm || 0) > 3 * 3600 * 1000); // limite diário: tenta horas depois
       if (r.status === 'erro' && passageira && r.segmentos.length) await processar(r.id);
     }
   } finally {

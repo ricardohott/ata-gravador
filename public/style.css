@@ -37,6 +37,7 @@ body {
 .sub, .dica, .vazio { color: var(--suave); margin: 0; }
 .erro { color: #fca5a5; margin: 0; }
 .pequeno { font-size: 13px; }
+.btn-link { background: none; border: 0; color: var(--suave); text-decoration: underline; font: 14px system-ui, sans-serif; padding: 8px; cursor: pointer; }
 .passos { text-align: left; margin: 0 0 4px; padding-left: 20px; color: var(--suave); display: flex; flex-direction: column; gap: 6px; }
 .passos a { color: var(--azul); }
 .passos b { color: var(--texto); }
