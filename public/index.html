@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111418">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Ata — gravador de reuniões</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Chave do Gemini: pedida uma vez, fica só neste celular -->
+  <section id="tela-entrar" class="tela" hidden>
+    <div class="centro">
+      <div class="marca">Ata</div>
+      <p class="sub">Grave a reunião. Receba a ata pronta.</p>
+      <form id="form-entrar">
+        <ol class="passos">
+          <li>Abra <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> e entre com sua conta Google.</li>
+          <li>Toque em <b>Create API key</b> e copie a chave.</li>
+          <li>Cole aqui. É grátis e não pede cartão.</li>
+        </ol>
+        <input id="chave" type="password" autocomplete="off" placeholder="Cole a chave do Gemini" required>
+        <button id="btn-entrar" class="btn primario" type="submit">Salvar chave</button>
+        <p id="erro-entrar" class="erro" hidden></p>
+        <p class="sub pequeno">A chave fica guardada só neste celular.</p>
+        <button id="btn-cancelar-chave" class="btn secundario" type="button" hidden>Voltar</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- Início: botão de gravar + reuniões anteriores -->
+  <section id="tela-inicio" class="tela" hidden>
+    <header class="topo"><div class="marca">Ata</div><button id="btn-ajustes" class="btn-icone" aria-label="Ajustes">⚙</button></header>
+    <div class="area-gravar">
+      <button id="btn-gravar" class="btn-gravar" aria-label="Começar a gravar">
+        <span class="ponto"></span>
+      </button>
+      <p class="dica">Toque para gravar uma reunião</p>
+      <p id="aviso-mic" class="erro" hidden></p>
+    </div>
+    <h2 class="titulo-lista">Reuniões</h2>
+    <ul id="lista" class="lista"></ul>
+    <p id="lista-vazia" class="vazio" hidden>Nenhuma reunião ainda. As gravações ficam guardadas neste celular.</p>
+  </section>
+
+  <!-- Gravando -->
+  <section id="tela-gravando" class="tela gravando" hidden>
+    <div class="centro">
+      <div id="estado-gravacao" class="estado"><span class="pulso"></span> Gravando</div>
+      <div id="cronometro" class="cronometro">00:00</div>
+      <canvas id="nivel" class="nivel" width="300" height="60" aria-hidden="true"></canvas>
+      <p id="aviso-tela" class="dica">Mantenha o app aberto. A tela não vai apagar sozinha.</p>
+      <textarea id="contexto" rows="2" placeholder="Anotação opcional (ex.: reunião com fornecedor X)"></textarea>
+      <div class="acoes-gravacao">
+        <button id="btn-pausar" class="btn secundario">Pausar</button>
+        <button id="btn-parar" class="btn perigo">Encerrar</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Detalhe de uma reunião -->
+  <section id="tela-detalhe" class="tela" hidden>
+    <header class="topo">
+      <button id="btn-voltar" class="btn-icone" aria-label="Voltar">‹</button>
+      <div class="marca pequena">Ata</div>
+      <button id="btn-compartilhar" class="btn-icone" aria-label="Compartilhar">⇪</button>
+    </header>
+    <div id="detalhe" class="detalhe"></div>
+  </section>
+
+  <div id="aviso" class="aviso" hidden></div>
+
+  <script src="gemini.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "gravador-reunioes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Grava reuniões presenciais pelo celular, transcreve e resume.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node teste.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
