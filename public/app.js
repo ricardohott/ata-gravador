@@ -477,7 +477,9 @@ function transcreverPendentes(id) {
       const antes = falasDe({ segmentos: r.segmentos.filter((p) => p.n < seg.n) });
       const anterior = antes.slice(-12).map((f) => `Pessoa ${f.pessoa}: ${f.texto}`).join('\n').slice(-2500);
       const maior = antes.reduce((m, f) => Math.max(m, f.pessoa), 0);
+      const t0 = Date.now();
       const falas = await transcreverAudio(audio.blob, audio.mime || seg.mime, anterior, maior);
+      registrar(`parte ${seg.n} transcrita em ${Math.round((Date.now() - t0) / 1000)} s (${Math.round(audio.blob.size / 1024)} KB, ${falas.length} falas)`);
       const texto = falas.map((f) => `Pessoa ${f.pessoa}: ${f.texto}`).join('\n');
       // Reler antes de gravar: a tela de gravação pode ter acrescentado pedaços nesse meio-tempo.
       const atual = await lerReuniao(id);
@@ -508,8 +510,9 @@ async function processarAgora(id) {
   let r = await lerReuniao(id);
   if (!r) return;
   registrar(`processando ${id}: ${r.segmentos.length} parte(s), ${fmtDuracao(r.duracaoSeg)}`);
+  const inicioProcesso = Date.now();
   try {
-    r.erro = ''; r.status = 'processando'; await salvarReuniao(r);
+    r.erro = ''; r.status = 'processando'; r.processandoDesde = inicioProcesso; await salvarReuniao(r);
     if (telaAberta === id) renderDetalhe(r);
     await transcreverPendentes(id);
     r = await lerReuniao(id);
@@ -517,9 +520,11 @@ async function processarAgora(id) {
     await salvarReuniao(r);
     if (telaAberta === id) renderDetalhe(r);
     if (!r.transcricao.trim()) throw new Error('Não foi captada nenhuma fala na gravação.');
+    const tAta = Date.now();
     r.resumo = await escreverAta({
       transcricao: r.transcricao, inicio: r.inicio, duracaoSeg: r.duracaoSeg, contexto: r.contexto,
     });
+    registrar(`ata escrita em ${Math.round((Date.now() - tAta) / 1000)} s; total ${Math.round((Date.now() - inicioProcesso) / 1000)} s`);
     // Nomes que a ata descobriu entram no lugar de "Pessoa N" — menos os que você já escreveu.
     r.nomes ||= {}; r.nomesAuto ||= {};
     for (const p of r.resumo.pessoas || []) {
@@ -550,12 +555,13 @@ async function abrirDetalhe(id) {
   const r = await lerReuniao(id);
   if (!r) return voltar();
   renderDetalhe(r);
+  montarPlayer(r);
   mostrar('detalhe');
 }
 
 function voltar() {
   telaAberta = null;
-  for (const a of document.querySelectorAll('#detalhe audio')) URL.revokeObjectURL(a.src);
+  limparPlayer();
   renderLista();
   mostrar('inicio');
 }
@@ -583,6 +589,7 @@ function renderDetalhe(r) {
       ${etapa(true, false, 'Áudio salvo no celular')}
       ${etapa(transcrito, !transcrito, `Transcrevendo${total > 1 ? ` (${feitos} de ${total} partes)` : ''}`)}
       ${etapa(false, transcrito, 'Escrevendo a ata')}
+      <p class="sub pequeno" style="margin-top:6px">Tempo: <span id="tempo-processando" data-desde="${r.processandoDesde || Date.now()}">0:00</span> · deixe o app aberto; pode ouvir a gravação enquanto isso.</p>
     </div>`;
   } else if (r.status === 'erro') {
     corpo = `<div class="bloco">
@@ -643,17 +650,91 @@ function renderDetalhe(r) {
     : esc('Ainda não transcrito.');
   corpo += `
     <div class="bloco">
-      <details><summary>Transcrição completa</summary><div class="transcricao">${transcricaoHtml}</div></details>
+      <details data-chave="transcricao"><summary>Transcrição completa</summary><div class="transcricao">${transcricaoHtml}</div></details>
     </div>
-    <div class="bloco"><details id="audios"><summary>Ouvir a gravação (${total} ${total === 1 ? 'parte' : 'partes'})</summary><div id="lista-audios"></div></details></div>
-    <div class="acoes-detalhe">
+`;
+  $('#acoes-reuniao').innerHTML = `
       ${r.status === 'pronta' ? '<button class="btn secundario" data-acao="refazer">Refazer a ata</button>' : ''}
-      <button class="btn secundario" data-acao="apagar">Apagar reunião</button>
-    </div>`;
+      <button class="btn secundario" data-acao="apagar">Apagar reunião</button>`;
 
+  // Redesenhar não pode fechar o que a pessoa abriu (ex.: a transcrição, durante o processamento).
+  const abertos = new Set([...document.querySelectorAll('#detalhe details[open]')].map((d) => d.dataset.chave));
+  const mesmaReuniao = $('#detalhe').dataset.id === r.id;
   $('#detalhe').innerHTML = cab + corpo;
+  if (mesmaReuniao) for (const d of document.querySelectorAll('#detalhe details')) if (abertos.has(d.dataset.chave)) d.open = true;
   $('#detalhe').dataset.id = r.id;
   reuniaoAberta = r;
+}
+
+// Relógio do processamento, sem redesenhar a tela.
+setInterval(() => {
+  const el = document.getElementById('tempo-processando');
+  if (el) el.textContent = fmtDuracao((Date.now() - Number(el.dataset.desde)) / 1000);
+}, 1000);
+
+// ---------- ouvir a gravação ----------
+// O player mora FORA da área que é redesenhada a cada etapa da transcrição: antes ele era
+// apagado e fechado no meio do áudio. Só é montado ao abrir uma reunião.
+
+let urlsAudio = [];
+function limparPlayer() {
+  for (const u of urlsAudio) URL.revokeObjectURL(u);
+  urlsAudio = [];
+  $('#player').innerHTML = '';
+  $('#player').hidden = true;
+}
+
+function extensaoAudio(mime) {
+  return /mp4|m4a|aac/.test(mime || '') ? 'm4a' : /ogg/.test(mime || '') ? 'ogg' : 'webm';
+}
+
+async function montarPlayer(r) {
+  limparPlayer();
+  if (!r.segmentos.length) return;
+  const caixa = $('#player');
+  caixa.hidden = false;
+  caixa.innerHTML = `<details class="bloco" id="audios"><summary>Ouvir a gravação (${r.segmentos.length} ${r.segmentos.length === 1 ? 'parte' : 'partes'})</summary><div id="lista-audios"><p class="sub pequeno">Carregando…</p></div></details>`;
+  $('#audios').addEventListener('toggle', async (e) => {
+    if (!e.target.open || $('#lista-audios').dataset.pronto) return;
+    $('#lista-audios').dataset.pronto = '1';
+    const lista = $('#lista-audios');
+    lista.innerHTML = '';
+    const data = new Date(r.inicio).toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    for (const p of r.segmentos) {
+      let a;
+      try { a = await lerAudio(r.id, p.n); } catch (err) { registrar(`ERRO lendo áudio ${r.id}:${p.n}: ${err.message}`); }
+      if (!a || !a.blob.size) continue;
+      const tipo = (a.mime || 'audio/webm').split(';')[0];
+      const url = URL.createObjectURL(new Blob([a.blob], { type: tipo }));
+      urlsAudio.push(url);
+      const nome = `reuniao-${data}${r.segmentos.length > 1 ? `-parte${p.n + 1}` : ''}.${extensaoAudio(tipo)}`;
+      const item = document.createElement('div');
+      item.className = 'parte-audio';
+      item.innerHTML = `${r.segmentos.length > 1 ? `<small>Parte ${p.n + 1}</small>` : ''}
+        <audio controls preload="metadata" src="${url}"></audio>
+        <a class="btn-link" href="${url}" download="${nome}">Baixar áudio (${a.blob.size < 1048576 ? Math.max(1, Math.round(a.blob.size / 1024)) + " KB" : (a.blob.size / 1048576).toFixed(1).replace(".", ",") + " MB"})</a>
+        <p class="erro pequeno" hidden>Este celular não conseguiu tocar aqui. Use "Baixar áudio" e abra no app de música.</p>`;
+      const audio = item.querySelector('audio');
+      // Áudio gravado pelo celular (webm) vem sem duração: o player mostra 0:00 e não deixa avançar.
+      // Pular para o fim e voltar faz o navegador calcular a duração de verdade.
+      audio.addEventListener('loadedmetadata', () => {
+        if (audio.duration !== Infinity) return;
+        audio.currentTime = 1e7;
+        audio.addEventListener('timeupdate', function volta() {
+          audio.removeEventListener('timeupdate', volta);
+          audio.currentTime = 0;
+        });
+      });
+      audio.addEventListener('error', () => {
+        registrar(`ERRO tocando parte ${p.n} (${tipo}): código ${audio.error?.code}`);
+        item.querySelector('.erro').hidden = false;
+      });
+      // Uma parte termina, a próxima começa.
+      audio.addEventListener('ended', () => item.nextElementSibling?.querySelector('audio')?.play().catch(() => {}));
+      lista.append(item);
+    }
+    if (!lista.children.length) lista.innerHTML = '<p class="sub pequeno">Não encontrei o áudio desta reunião neste celular.</p>';
+  });
 }
 
 // Guardada na hora de desenhar: compartilhar precisa sair no mesmo toque, sem esperar o banco.
@@ -687,23 +768,8 @@ $('#detalhe').addEventListener('submit', async (e) => {
   avisar('Nomes salvos.');
 });
 
-$('#detalhe').addEventListener('toggle', async (e) => {
-  if (e.target.id !== 'audios' || !e.target.open) return;
-  const id = $('#detalhe').dataset.id;
-  const r = await lerReuniao(id);
-  const caixa = $('#lista-audios');
-  caixa.innerHTML = '';
-  for (const p of r.segmentos) {
-    const a = await lerAudio(id, p.n);
-    if (!a) continue;
-    const el = document.createElement('audio');
-    el.controls = true; el.preload = 'metadata';
-    el.src = URL.createObjectURL(a.blob);
-    caixa.append(el);
-  }
-}, true);
 
-$('#detalhe').addEventListener('click', async (e) => {
+$('#tela-detalhe').addEventListener('click', async (e) => {
   const acao = e.target.dataset?.acao;
   if (!acao) return;
   if (acao === 'copiar') return copiarAta();

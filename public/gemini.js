@@ -141,7 +141,45 @@ async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
     localStorage.removeItem('ata-modelo'); // o modelo saiu do ar: a próxima tentativa escolhe outro
     throw new ErroGemini('O modelo do Gemini mudou de nome. Toque em "Tentar de novo".', 'modelo');
   }
-  throw new ErroGemini(`O Gemini recusou o pedido (${r.status}). ${msg}`.trim(), 'outro');
+  throw Object.assign(new ErroGemini(`O Gemini recusou o pedido (${r.status}). ${msg}`.trim(), 'outro'), { status: r.status, detalhe: msg });
+}
+
+// Os modelos Flash "pensam" antes de responder, e isso é o que mais demora. Transcrever não
+// precisa de raciocínio e a ata precisa de pouco: pedimos o mínimo. Cada geração de modelo
+// aceita um jeito diferente de pedir; quem recusar (erro 400 falando de "thinking") passa
+// para a próxima opção, e a que funcionou fica lembrada para o próximo pedido.
+const POUCO_PENSAMENTO = {
+  transcricao: [{ thinkingLevel: 'minimal' }, { thinkingLevel: 'low' }, { thinkingBudget: 0 }, null],
+  ata: [{ thinkingLevel: 'low' }, { thinkingBudget: 1024 }, null],
+};
+
+function memoriaPensar() {
+  try { return JSON.parse(localStorage.getItem('ata-pensar') || '{}'); } catch { return {}; }
+}
+
+async function chamarComPoucoPensamento(modelo, corpo, etapa) {
+  const opcoes = POUCO_PENSAMENTO[etapa];
+  const memoria = memoriaPensar();
+  const chave = `${modelo}|${etapa}`;
+  for (let i = memoria[chave] || 0; i < opcoes.length; i++) {
+    const pensar = opcoes[i];
+    const pedido = { ...corpo, generationConfig: { ...corpo.generationConfig, ...(pensar ? { thinkingConfig: pensar } : {}) } };
+    try {
+      const dados = await chamarGemini(`models/${modelo}:generateContent`, pedido);
+      if (memoria[chave] !== i) {
+        memoria[chave] = i;
+        localStorage.setItem('ata-pensar', JSON.stringify(memoria));
+      }
+      return dados;
+    } catch (e) {
+      const recusouPensar = e.status === 400 && /think|budget|level/i.test(e.detalhe || '');
+      if (recusouPensar && i < opcoes.length - 1) {
+        if (typeof registrar === 'function') registrar(`${modelo} recusou ${JSON.stringify(pensar)} (${etapa}); tentando outra forma`);
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 // Modelos que servem, em ordem de preferência: o apelido "flash-latest" (sempre o Flash atual),
@@ -191,7 +229,7 @@ const esperar = (ms) => new Promise((ok) => setTimeout(ok, ms));
 // para a etapa seguinte (ex.: a ata depois da transcrição) não esperar por ele de novo.
 const ocupadoAte = {};
 
-async function gerar(corpo) {
+async function gerar(corpo, etapa) {
   const todos = [modeloGemini(), ...(await modelosReserva())];
   const livre = (m) => !(ocupadoAte[m] > Date.now());
   const modelos = [...todos.filter(livre), ...todos.filter((m) => !livre(m))];
@@ -200,7 +238,7 @@ async function gerar(corpo) {
     for (const espera of [0, 3000, 8000]) {
       if (espera) await esperar(espera);
       try {
-        return await chamarGemini(`models/${modelo}:generateContent`, corpo);
+        return await chamarComPoucoPensamento(modelo, corpo, etapa);
       } catch (e) {
         ultimo = e;
         if (e.tipo === 'minuto') { await esperar(30000); continue; } // limite por minuto: espera e repete
@@ -245,7 +283,7 @@ Uma voz que ainda não apareceu recebe o próximo número livre (a partir de ${m
       parts: [{ inlineData: { mimeType: (mime || 'audio/webm').split(';')[0], data: await blobParaBase64(blob) } }, { text: pedido }],
     }],
     generationConfig: { temperature: 0, maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_FALAS },
-  });
+  }, 'transcricao');
   let falas;
   try {
     falas = JSON.parse(textoDaResposta(dados)).falas;
@@ -276,7 +314,7 @@ async function escreverAta({ transcricao, inicio, duracaoSeg, contexto }) {
     systemInstruction: { parts: [{ text: PEDIDO_ATA }] },
     contents: [{ role: 'user', parts: [{ text: `${cabecalho}\n\n<transcricao>\n${transcricao}\n</transcricao>` }] }],
     generationConfig: { maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_ATA },
-  });
+  }, 'ata');
   try {
     return JSON.parse(textoDaResposta(dados));
   } catch (e) {
