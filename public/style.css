@@ -99,7 +99,19 @@ textarea { resize: none; max-width: 340px; }
 .girando { display: inline-block; animation: gira 1s linear infinite; }
 @keyframes gira { to { transform: rotate(360deg); } }
 details summary { cursor: pointer; color: var(--suave); }
-.transcricao { white-space: pre-wrap; color: #cbd5e1; font-size: 15px; margin-top: 12px; }
+.transcricao { color: #cbd5e1; font-size: 15px; margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.fala { white-space: pre-wrap; }
+.fala b { font-weight: 700; margin-right: 4px; }
+
+/* Uma cor por pessoa (até 8; depois repete) */
+.p0, .t0 { --c: #60a5fa; } .p1, .t1 { --c: #f472b6; } .p2, .t2 { --c: #34d399; } .p3, .t3 { --c: #fbbf24; }
+.p4, .t4 { --c: #a78bfa; } .p5, .t5 { --c: #fb923c; } .p6, .t6 { --c: #22d3ee; } .p7, .t7 { --c: #f87171; }
+.fala b { color: var(--c); }
+.pessoas { display: flex; flex-direction: column; gap: 10px; max-width: none; }
+.pessoa { display: grid; grid-template-columns: 14px 1fr; gap: 2px 10px; align-items: center; }
+.pessoa .cor { width: 14px; height: 14px; border-radius: 50%; background: var(--c); }
+.pessoa input { padding: 10px 12px; }
+.pessoa small { grid-column: 2; color: var(--suave); font-size: 12px; }
 audio { width: 100%; margin-top: 8px; }
 .acoes-detalhe { display: flex; gap: 8px; flex-wrap: wrap; }
 .enviar .acoes-detalhe .btn { flex: 1; text-align: center; text-decoration: none; }

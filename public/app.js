@@ -1,7 +1,7 @@
 // Ata — gravador de reuniões presenciais.
 //
 // Como a gravação funciona:
-// - O áudio é cortado em pedaços de 5 min. Cada pedaço é um arquivo completo e
+// - O áudio é cortado em pedaços de 15 min. Cada pedaço é um arquivo completo e
 //   independente, então dá para transcrever enquanto a reunião continua e o resumo
 //   sai poucos segundos depois de encerrar.
 // - Tudo vai para o IndexedDB do celular a cada 10 s. Se o app fechar no meio,
@@ -9,7 +9,9 @@
 
 'use strict';
 
-const PEDACO_MS = 5 * 60 * 1000;
+// 15 min: cada corte é um ponto onde a numeração de quem fala pode se perder,
+// então menos cortes = menos trocas. 15 min a 32 kbps ≈ 3,6 MB, bem abaixo do limite do Gemini.
+const PEDACO_MS = 15 * 60 * 1000;
 const SALVAR_MS = 10 * 1000;
 
 const $ = (s) => document.querySelector(s);
@@ -161,7 +163,7 @@ function iniciarPedaco() {
   rec.ondataavailable = (e) => { if (e.data && e.data.size) pedacos.push(e.data); };
   rec.onstop = () => { gravacao.fechando = fecharPedaco(n, pedacos, rec.mimeType || gravacao.mime); };
   rec.start(SALVAR_MS);
-  // Corta a cada 5 min de gravação efetiva (pausa não conta).
+  // Corta a cada 15 min de gravação efetiva (pausa não conta).
   clearTimeout(gravacao.tCorte);
   gravacao.tCorte = setTimeout(cortarPedaco, PEDACO_MS);
 }
@@ -277,6 +279,28 @@ function desenharNivel() {
 
 // ---------- transcrição e resumo ----------
 
+// Todas as falas da reunião, em ordem. Gravações antigas (antes da separação por pessoa)
+// só têm texto corrido: viram uma fala sem dono (pessoa 0).
+function falasDe(r) {
+  const todas = [];
+  for (const seg of r.segmentos || []) {
+    const lista = seg.falas || (seg.texto ? [{ pessoa: 0, texto: seg.texto }] : []);
+    for (const f of lista) {
+      const ultima = todas[todas.length - 1];
+      if (ultima && ultima.pessoa === f.pessoa && f.pessoa) ultima.texto += ' ' + f.texto;
+      else todas.push({ ...f });
+    }
+  }
+  return todas;
+}
+
+const nomeDe = (r, n) => (n ? r.nomes?.[n] || `Pessoa ${n}` : '');
+const pessoasDe = (r) => [...new Set(falasDe(r).map((f) => f.pessoa).filter(Boolean))].sort((a, b) => a - b);
+
+function transcricaoComNomes(r) {
+  return falasDe(r).map((f) => (f.pessoa ? `${nomeDe(r, f.pessoa)}: ${f.texto}` : f.texto)).join('\n\n');
+}
+
 // Uma fila só: dois pedidos simultâneos para a mesma reunião sobrescreveriam um ao outro.
 let fila = Promise.resolve();
 const naFila = (fn) => (fila = fila.then(fn, fn));
@@ -289,17 +313,21 @@ function transcreverPendentes(id) {
       if (seg.texto != null || (r.status === 'gravando' && !seg.fechado)) continue;
       const audio = await lerAudio(id, seg.n);
       if (!audio) { seg.texto = ''; continue; }
-      const anterior = r.segmentos.filter((p) => p.n < seg.n && p.texto).map((p) => p.texto).join(' ');
-      const texto = await transcreverAudio(audio.blob, audio.mime || seg.mime, anterior.slice(-400));
+      // Contexto para manter a numeração: as últimas falas do trecho anterior, já rotuladas.
+      const antes = falasDe({ segmentos: r.segmentos.filter((p) => p.n < seg.n) });
+      const anterior = antes.slice(-12).map((f) => `Pessoa ${f.pessoa}: ${f.texto}`).join('\n').slice(-2500);
+      const maior = antes.reduce((m, f) => Math.max(m, f.pessoa), 0);
+      const falas = await transcreverAudio(audio.blob, audio.mime || seg.mime, anterior, maior);
+      const texto = falas.map((f) => `Pessoa ${f.pessoa}: ${f.texto}`).join('\n');
       // Reler antes de gravar: a tela de gravação pode ter acrescentado pedaços nesse meio-tempo.
       const atual = await lerReuniao(id);
       const alvo = atual.segmentos.find((p) => p.n === seg.n);
-      if (alvo) alvo.texto = texto;
-      seg.texto = texto;
+      if (alvo) Object.assign(alvo, { texto, falas });
+      Object.assign(seg, { texto, falas });
       // A gravação em curso guarda a reunião na memória e a salva a cada 10 s;
       // sem isso ela apagaria o texto recém-chegado e o trecho seria pago duas vezes.
       const viva = gravacao.reuniao?.id === id && gravacao.reuniao.segmentos.find((p) => p.n === seg.n);
-      if (viva) viva.texto = texto;
+      if (viva) Object.assign(viva, { texto, falas });
       await salvarReuniao(atual);
       if (telaAberta === id) renderDetalhe(atual);
     }
@@ -313,13 +341,22 @@ async function processar(id) {
     if (telaAberta === id) renderDetalhe(r);
     await transcreverPendentes(id);
     r = await lerReuniao(id);
-    r.transcricao = r.segmentos.map((p) => p.texto).filter(Boolean).join('\n\n');
+    r.transcricao = transcricaoComNomes(r);
     await salvarReuniao(r);
     if (telaAberta === id) renderDetalhe(r);
     if (!r.transcricao.trim()) throw new Error('Não foi captada nenhuma fala na gravação.');
     r.resumo = await escreverAta({
       transcricao: r.transcricao, inicio: r.inicio, duracaoSeg: r.duracaoSeg, contexto: r.contexto,
     });
+    // Nomes que a ata descobriu entram no lugar de "Pessoa N" — menos os que você já escreveu.
+    r.nomes ||= {}; r.nomesAuto ||= {};
+    for (const p of r.resumo.pessoas || []) {
+      const nome = String(p.nome || '').trim();
+      if (nome && (!r.nomes[p.numero] || r.nomesAuto[p.numero])) {
+        r.nomes[p.numero] = nome; r.nomesAuto[p.numero] = true;
+      }
+    }
+    r.transcricao = transcricaoComNomes(r);
     r.status = 'pronta';
   } catch (e) {
     r = (await lerReuniao(id)) || r;
@@ -396,7 +433,7 @@ function renderDetalhe(r) {
         </div>
       </div>
       <div class="bloco"><h3>Resumo</h3><p>${esc(s.resumo)}</p>
-        ${s.participantes?.length ? `<p class="sub" style="margin-top:8px">Participantes: ${esc(s.participantes.join(', '))}</p>` : ''}</div>
+        ${participantes(r) ? `<p class="sub" style="margin-top:8px">Participantes: ${esc(participantes(r))}</p>` : ''}</div>
       <div class="bloco"><h3>Decisões</h3>${lista(s.decisoes)}</div>
       <div class="bloco"><h3>Tarefas</h3>${s.tarefas?.length ? `<ul>${s.tarefas.map((t) => `
         <li class="tarefa">${esc(t.descricao)}${t.responsavel || t.prazo ? `<small>${esc([t.responsavel, t.prazo].filter(Boolean).join(' · '))}</small>` : ''}</li>`).join('')}</ul>` : '<p class="sub">Nenhuma.</p>'}</div>
@@ -404,10 +441,35 @@ function renderDetalhe(r) {
       ${(s.topicos || []).map((t) => `<div class="bloco"><h3>${esc(t.titulo)}</h3>${lista(t.pontos)}</div>`).join('')}`;
   }
 
-  const texto = r.transcricao || r.segmentos.map((p) => p.texto).filter(Boolean).join('\n\n');
+  const falas = falasDe(r);
+  const pessoas = pessoasDe(r);
+  if (pessoas.length && r.status !== 'gravando') {
+    const papel = (n) => (s?.pessoas || []).find((p) => p.numero === n)?.papel || '';
+    const qtd = (n) => falas.filter((f) => f.pessoa === n).length;
+    corpo += `
+      <div class="bloco">
+        <h3>Quem falou</h3>
+        <p class="sub pequeno" style="margin-bottom:10px">Escreva o nome de quem você reconhecer. A ata é refeita com os nomes.</p>
+        <form id="form-nomes" class="pessoas">
+          ${pessoas.map((n) => `
+            <label class="pessoa">
+              <span class="cor p${(n - 1) % 8}"></span>
+              <input name="${n}" value="${esc(r.nomes?.[n] || '')}" placeholder="Pessoa ${n}" autocomplete="off">
+              <small>${esc([papel(n), `${qtd(n)} ${qtd(n) === 1 ? 'fala' : 'falas'}`].filter(Boolean).join(' · '))}</small>
+            </label>`).join('')}
+          <button class="btn secundario" type="submit">Salvar nomes${s ? ' e refazer a ata' : ''}</button>
+        </form>
+      </div>`;
+  }
+
+  const transcricaoHtml = falas.length
+    ? falas.map((f) => (f.pessoa
+      ? `<div class="fala"><b class="t${(f.pessoa - 1) % 8}">${esc(nomeDe(r, f.pessoa))}</b> ${esc(f.texto)}</div>`
+      : `<div class="fala">${esc(f.texto)}</div>`)).join('')
+    : esc('Ainda não transcrito.');
   corpo += `
     <div class="bloco">
-      <details><summary>Transcrição completa</summary><div class="transcricao">${esc(texto || 'Ainda não transcrito.')}</div></details>
+      <details><summary>Transcrição completa</summary><div class="transcricao">${transcricaoHtml}</div></details>
     </div>
     <div class="bloco"><details id="audios"><summary>Ouvir a gravação (${total} ${total === 1 ? 'parte' : 'partes'})</summary><div id="lista-audios"></div></details></div>
     <div class="acoes-detalhe">
@@ -422,6 +484,34 @@ function renderDetalhe(r) {
 
 // Guardada na hora de desenhar: compartilhar precisa sair no mesmo toque, sem esperar o banco.
 let reuniaoAberta = null;
+
+// "Ricardo (corretor), Carlos, Pessoa 3" — ou a lista antiga, de atas de antes da separação por pessoa.
+function participantes(r) {
+  const pessoas = pessoasDe(r);
+  if (!pessoas.length) return (r.resumo?.participantes || []).join(', ');
+  return pessoas.map((n) => {
+    const papel = (r.resumo?.pessoas || []).find((p) => p.numero === n)?.papel;
+    return papel ? `${nomeDe(r, n)} (${papel})` : nomeDe(r, n);
+  }).join(', ');
+}
+
+$('#detalhe').addEventListener('submit', async (e) => {
+  if (e.target.id !== 'form-nomes') return;
+  e.preventDefault();
+  const r = await lerReuniao($('#detalhe').dataset.id);
+  r.nomes ||= {}; r.nomesAuto ||= {};
+  for (const [n, valor] of new FormData(e.target)) {
+    const nome = String(valor).trim();
+    if (nome === (r.nomes[n] || '')) continue; // não mexeu: um nome sugerido continua sugerido
+    if (nome) r.nomes[n] = nome; else delete r.nomes[n];
+    delete r.nomesAuto[n]; // escrito por você: a ata não troca mais
+  }
+  r.transcricao = transcricaoComNomes(r);
+  await salvarReuniao(r);
+  if (r.resumo) { r.resumo = null; await salvarReuniao(r); processar(r.id); }
+  else renderDetalhe(r);
+  avisar('Nomes salvos.');
+});
 
 $('#detalhe').addEventListener('toggle', async (e) => {
   if (e.target.id !== 'audios' || !e.target.open) return;
@@ -463,7 +553,7 @@ function textoParaCompartilhar(r, formato = 'whats') {
   const secao = (nome, arr, vazio) => `\n${titulo(nome)}\n${arr?.length ? arr.map((i) => `• ${i}`).join('\n') : vazio}`;
   const partes = [
     titulo(s.titulo), `${fmtData(r.inicio)} · ${fmtDuracao(r.duracaoSeg)}`,
-    s.participantes?.length ? `Participantes: ${s.participantes.join(', ')}` : null,
+    participantes(r) ? `Participantes: ${participantes(r)}` : null,
     `\n${titulo('Resumo')}\n${s.resumo}`,
     secao('Decisões', s.decisoes, 'Nenhuma decisão registrada.'),
     secao('Tarefas', s.tarefas?.map((t) => [t.descricao, t.responsavel, t.prazo].filter(Boolean).join(' — ')), 'Nenhuma tarefa registrada.'),

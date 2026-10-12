@@ -11,7 +11,7 @@ function confere(nome, cond) {
 
 // gemini.js roda num contexto isolado só para ler o esquema
 const ctx = { localStorage: { getItem: () => null }, fetch: () => {} };
-vm.runInNewContext(fs.readFileSync('public/gemini.js', 'utf8') + ';this.ESQUEMA_ATA = ESQUEMA_ATA;', ctx);
+vm.runInNewContext(fs.readFileSync('public/gemini.js', 'utf8') + ';this.ESQUEMA_ATA = ESQUEMA_ATA; this.ESQUEMA_FALAS = ESQUEMA_FALAS;', ctx);
 
 const servidor = app.listen(0, async () => {
   const base = `http://localhost:${servidor.address().port}`;
@@ -29,6 +29,8 @@ const servidor = app.listen(0, async () => {
       (Object.keys(s.properties).every((k) => s.required.includes(k)) &&
         Object.values(s.properties).every((p) => obrigatoriosOk(p.items || p)));
     confere('esquema da ata: todo campo é obrigatório', obrigatoriosOk(ctx.ESQUEMA_ATA));
+    confere('esquema das falas: todo campo é obrigatório', obrigatoriosOk(ctx.ESQUEMA_FALAS));
+    confere('ata pede quem é cada pessoa', 'pessoas' in ctx.ESQUEMA_ATA.properties);
   } catch (e) {
     falhas++; console.error(e);
   }

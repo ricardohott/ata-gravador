@@ -10,7 +10,19 @@ const ESQUEMA_ATA = {
   properties: {
     titulo: { type: 'string', description: 'Título curto da reunião, até 8 palavras' },
     resumo: { type: 'string', description: 'Resumo em 3 a 6 frases' },
-    participantes: { type: 'array', items: { type: 'string' }, description: 'Nomes citados; vazio se não houver' },
+    pessoas: {
+      type: 'array',
+      description: 'Uma entrada para cada "Pessoa N" da transcrição',
+      items: {
+        type: 'object',
+        properties: {
+          numero: { type: 'integer', description: 'O N de "Pessoa N"' },
+          nome: { type: 'string', description: 'Nome real, só se deu para deduzir com segurança pela conversa; senão ""' },
+          papel: { type: 'string', description: 'Papel na reunião em poucas palavras (ex.: fornecedor, cliente); "" se não ficou claro' },
+        },
+        required: ['numero', 'nome', 'papel'],
+      },
+    },
     topicos: {
       type: 'array',
       items: {
@@ -34,19 +46,46 @@ const ESQUEMA_ATA = {
     },
     proximos_passos: { type: 'array', items: { type: 'string' } },
   },
-  required: ['titulo', 'resumo', 'participantes', 'topicos', 'decisoes', 'tarefas', 'proximos_passos'],
+  required: ['titulo', 'resumo', 'pessoas', 'topicos', 'decisoes', 'tarefas', 'proximos_passos'],
+};
+
+const ESQUEMA_FALAS = {
+  type: 'object',
+  properties: {
+    falas: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          pessoa: { type: 'integer', description: 'Número de quem fala: 1, 2, 3...' },
+          texto: { type: 'string' },
+        },
+        required: ['pessoa', 'texto'],
+      },
+    },
+  },
+  required: ['falas'],
 };
 
 const PEDIDO_TRANSCRICAO = `Transcreva este áudio, em português do Brasil, exatamente como foi falado.
-É um trecho de uma reunião presencial gravada pelo celular.
-Quando der para perceber que outra pessoa começou a falar, comece um novo parágrafo.
-Não resuma, não comente, não traduza. Devolva só o texto falado.
-Se não houver fala, devolva vazio.`;
+É um trecho de uma reunião presencial gravada por um celular sobre a mesa; podem falar de 1 a 8 pessoas.
 
-const PEDIDO_ATA = `Você recebe a transcrição automática de uma reunião presencial, em português do Brasil.
+Separe por quem fala, prestando atenção na voz (timbre, altura, jeito de falar):
+- Cada voz diferente recebe um número: 1, 2, 3... Uma nova fala começa sempre que a voz muda.
+- A mesma voz mantém o mesmo número do começo ao fim do trecho.
+- Se duas pessoas falam ao mesmo tempo, transcreva o que der, cada uma com o seu número.
+- Na dúvida entre duas vozes parecidas, prefira manter o número de quem vinha falando.
+
+Não resuma, não comente, não traduza. Se não houver fala, devolva a lista vazia.`;
+
+const PEDIDO_ATA = `Você recebe a transcrição automática de uma reunião presencial, em português do Brasil,
+separada por quem fala ("Pessoa 1", "Pessoa 2"... ou o nome, quando já se sabe).
 Escreva a ata em português do Brasil, objetiva, para quem esteve lá relembrar e agir.
-- A transcrição pode ter palavras erradas; deduza pelo contexto, sem inventar fatos.
-- Decisões são só o que foi de fato combinado. Tarefas têm um verbo de ação; responsável e prazo apenas se foram ditos.
+- A transcrição pode ter palavras erradas e trocas de quem fala; deduza pelo contexto, sem inventar fatos.
+- Descubra quem é cada pessoa pelo que se diz ("Carlos, você manda?" seguido da resposta de alguém indica que esse alguém é o Carlos; "eu sou a Ana, da compras"). Só dê nome com segurança razoável.
+- Na ata, chame cada pessoa pelo nome quando souber; senão, por "Pessoa N".
+- Decisões são só o que foi de fato combinado; quando der para saber, diga quem propôs ou aceitou.
+- Tarefas têm um verbo de ação; responsável e prazo apenas se foram ditos.
 - Se a gravação for curta ou sem conteúdo de reunião, diga isso no resumo e deixe as listas vazias.`;
 
 const chaveGemini = () => localStorage.getItem('ata-chave') || '';
@@ -113,18 +152,41 @@ function blobParaBase64(blob) {
   });
 }
 
-async function transcreverAudio(blob, mime, anterior) {
-  const pedido = anterior
-    ? `${PEDIDO_TRANSCRICAO}\n\nPara manter nomes e o fio da conversa, este é o fim do trecho anterior (não repita):\n"""${anterior}"""`
-    : PEDIDO_TRANSCRICAO;
+// Devolve [{ pessoa, texto }]. `anterior` é o fim do trecho anterior já separado por pessoa:
+// o Gemini não ouve o áudio anterior, então é pelo assunto e pela ordem das falas
+// que ele tenta manter a mesma numeração entre os trechos.
+async function transcreverAudio(blob, mime, anterior, maiorNumero) {
+  let pedido = PEDIDO_TRANSCRICAO;
+  if (anterior) {
+    pedido += `\n\nEste trecho continua uma gravação. Fim do trecho anterior (não repita):\n"""\n${anterior}\n"""
+Mantenha a numeração: quem continua o assunto acima provavelmente é a mesma pessoa.
+Uma voz que ainda não apareceu recebe o próximo número livre (a partir de ${maiorNumero + 1}).`;
+  }
   const dados = await chamarGemini(`models/${modeloGemini()}:generateContent`, {
     contents: [{
       role: 'user',
       parts: [{ inlineData: { mimeType: (mime || 'audio/webm').split(';')[0], data: await blobParaBase64(blob) } }, { text: pedido }],
     }],
-    generationConfig: { temperature: 0 },
+    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_FALAS },
   });
-  return textoDaResposta(dados);
+  let falas;
+  try {
+    falas = JSON.parse(textoDaResposta(dados)).falas;
+  } catch (e) {
+    if (e instanceof ErroGemini) throw e;
+    throw new ErroGemini('A transcrição veio cortada. Toque em "Tentar de novo".', 'outro');
+  }
+  // Junta falas seguidas da mesma pessoa e descarta as vazias.
+  const juntas = [];
+  for (const f of falas || []) {
+    const texto = String(f.texto || '').trim();
+    const pessoa = Math.max(1, Math.round(Number(f.pessoa) || 1));
+    if (!texto) continue;
+    const ultima = juntas[juntas.length - 1];
+    if (ultima && ultima.pessoa === pessoa) ultima.texto += ' ' + texto;
+    else juntas.push({ pessoa, texto });
+  }
+  return juntas;
 }
 
 async function escreverAta({ transcricao, inicio, duracaoSeg, contexto }) {
