@@ -1,6 +1,6 @@
 {
-  "name": "ATA Elevatis",
-  "short_name": "ATA Elevatis",
+  "name": "ATAElevatis",
+  "short_name": "ATAElevatis",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

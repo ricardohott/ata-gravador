@@ -31,7 +31,7 @@ body {
 .marca { display: inline-flex; align-items: center; gap: 10px; font: 800 30px/1 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; letter-spacing: .02em; }
 .marca img { height: 1.15em; width: auto; }
 .marca .ata { background: var(--degrade); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.marca .elevatis { color: #fff; margin-left: -4px; }
+.marca .elevatis { color: #fff; }
 .topo .marca { font-size: 22px; gap: 8px; }
 .marca.pequena { font-size: 17px; }
 .sub, .dica, .vazio { color: var(--suave); margin: 0; }
