@@ -1,7 +1,8 @@
 {
   "name": "Ata — gravador de reuniões",
   "short_name": "Ata",
-  "start_url": "/",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#111418",
   "theme_color": "#111418",

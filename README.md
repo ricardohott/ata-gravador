@@ -8,5 +8,6 @@ App de celular (PWA) que grava reuniões presenciais, transcreve e escreve a ata
 
 Testar no computador: `npm install`, `npm start` → http://localhost:4180. Conferir: `npm test`.
 
-Publicação: Render, tipo *Static Site*, pasta `public`, sem comando de build. Cada push na `main` publica sozinho.
+Publicação: GitHub Pages (https://ricardohott.github.io/ata-gravador/), pelo workflow `.github/workflows/pages.yml`.
+Cada push na `main` publica sozinho em 1-2 min. Os caminhos do app são relativos porque o site vive numa subpasta.
 Ao mudar arquivos do app, suba a versão do cache em `public/sw.js` (`ata-vN`).

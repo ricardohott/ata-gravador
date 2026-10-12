@@ -23,7 +23,7 @@ const servidor = app.listen(0, async () => {
       confere(`${f} existe`, (await fetch(base + f)).ok);
     }
     const sw = fs.readFileSync('public/sw.js', 'utf8');
-    for (const f of ['gemini.js', 'app.js', 'style.css']) confere(`${f} no cache offline`, sw.includes(`/${f}`));
+    for (const f of ['gemini.js', 'app.js', 'style.css']) confere(`${f} no cache offline`, sw.includes(`'${f}'`));
 
     const obrigatoriosOk = (s) => s.type !== 'object' ||
       (Object.keys(s.properties).every((k) => s.required.includes(k)) &&
