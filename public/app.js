@@ -117,7 +117,7 @@ async function renderLista() {
     <li class="item" data-id="${r.id}">
       <span class="item-titulo">${esc(r.resumo?.titulo || r.contexto || 'Reunião sem título')}</span>
       <span class="item-meta">${fmtData(r.inicio)} · ${fmtDuracao(r.duracaoSeg)}
-        <span class="selo ${r.status}">${ROTULO[r.status] || r.status}</span></span>
+        <span class="selo ${r.status}">${ROTULO[r.status] || r.status}</span>${r.origem === 'importada' ? '<span class="selo">importada</span>' : ''}</span>
     </li>`).join('');
 }
 $('#lista').addEventListener('click', (e) => {
@@ -471,15 +471,32 @@ function transcreverPendentes(id) {
     if (!r) return;
     for (const seg of r.segmentos) {
       if (seg.texto != null || (r.status === 'gravando' && !seg.fechado)) continue;
-      const audio = await lerAudio(id, seg.n);
-      if (!audio) { seg.texto = ''; continue; }
       // Contexto para manter a numeração: as últimas falas do trecho anterior, já rotuladas.
       const antes = falasDe({ segmentos: r.segmentos.filter((p) => p.n < seg.n) });
       const anterior = antes.slice(-12).map((f) => `Pessoa ${f.pessoa}: ${f.texto}`).join('\n').slice(-2500);
       const maior = antes.reduce((m, f) => Math.max(m, f.pessoa), 0);
       const t0 = Date.now();
-      const falas = await transcreverAudio(audio.blob, audio.mime || seg.mime, anterior, maior);
-      registrar(`parte ${seg.n} transcrita em ${Math.round((Date.now() - t0) / 1000)} s (${Math.round(audio.blob.size / 1024)} KB, ${falas.length} falas)`);
+      let falas;
+      if (seg.janela) {
+        // Áudio importado longo: o arquivo vai uma vez para o Google e cada parte é uma janela de tempo.
+        try {
+          falas = await transcreverJanela(await arquivoNoGoogle(id), seg.janela.de, seg.janela.ate, anterior, maior);
+        } catch (e) {
+          // O Google apagou o arquivo antes do prazo (ou ele se perdeu): envia de novo e tenta mais uma vez.
+          if (![400, 403, 404].includes(e.status) || !/file/i.test(e.detalhe || '')) throw e;
+          registrar(`arquivo no Google não vale mais (${e.status}); enviando de novo`);
+          const x = await lerReuniao(id);
+          delete x.arquivoGemini;
+          await salvarReuniao(x);
+          falas = await transcreverJanela(await arquivoNoGoogle(id), seg.janela.de, seg.janela.ate, anterior, maior);
+        }
+        registrar(`janela ${seg.n} (${fmtDuracao(seg.janela.de)}–${fmtDuracao(seg.janela.ate)}) transcrita em ${Math.round((Date.now() - t0) / 1000)} s, ${falas.length} falas`);
+      } else {
+        const audio = await lerAudio(id, seg.n);
+        if (!audio) { seg.texto = ''; continue; }
+        falas = await transcreverAudio(audio.blob, audio.mime || seg.mime, anterior, maior);
+        registrar(`parte ${seg.n} transcrita em ${Math.round((Date.now() - t0) / 1000)} s (${Math.round(audio.blob.size / 1024)} KB, ${falas.length} falas)`);
+      }
       const texto = falas.map((f) => `Pessoa ${f.pessoa}: ${f.texto}`).join('\n');
       // Reler antes de gravar: a tela de gravação pode ter acrescentado pedaços nesse meio-tempo.
       const atual = await lerReuniao(id);
@@ -495,6 +512,91 @@ function transcreverPendentes(id) {
     }
   });
 }
+
+// ---------- importar áudio (Gravador do iPhone, WhatsApp, etc.) ----------
+// O Gravador da Apple grava com a tela apagada e com outros apps abertos — coisa que um app de
+// navegador não consegue no iPhone. A pessoa grava lá e traz o arquivo para cá.
+
+const JANELA_SEG = 15 * 60;            // mesmas partes de 15 min da gravação pelo app
+const DIRETO_ATE_BYTES = 14 * 1048576; // até aqui o áudio vai junto do pedido (limite ~20 MB em base64)
+
+// Duração pelo próprio navegador; se ele não souber, estima pelo tamanho (~64 kbps, o padrão do Gravador).
+function duracaoDoArquivo(arquivo) {
+  return new Promise((ok) => {
+    const url = URL.createObjectURL(arquivo);
+    const a = new Audio();
+    const fim = (seg) => { URL.revokeObjectURL(url); ok(seg); };
+    const estimativa = () => fim(arquivo.size / 8000);
+    a.preload = 'metadata';
+    a.onloadedmetadata = () => (Number.isFinite(a.duration) && a.duration > 0 ? fim(a.duration) : estimativa());
+    a.onerror = estimativa;
+    setTimeout(estimativa, 8000);
+    a.src = url;
+  });
+}
+
+async function importar(arquivo) {
+  if (!arquivo) return;
+  if (!/^audio\//.test(arquivo.type) && !/\.(m4a|mp3|wav|aac|ogg|opus|webm|flac|mp4)$/i.test(arquivo.name)) {
+    return avisar('Esse arquivo não parece ser um áudio. No Gravador, use "Salvar em Arquivos" e escolha a gravação.', 6000);
+  }
+  const mime = tipoAudio(arquivo.type, arquivo.name);
+  const duracao = await duracaoDoArquivo(arquivo);
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const curto = arquivo.size <= DIRETO_ATE_BYTES && duracao <= JANELA_SEG + 60;
+  const segmentos = curto
+    ? [{ n: 0, mime, texto: null, fechado: true }]
+    : Array.from({ length: Math.ceil(duracao / JANELA_SEG) }, (_, n) => ({
+      n, mime, texto: null, fechado: true,
+      janela: { de: n * JANELA_SEG, ate: Math.min((n + 1) * JANELA_SEG, Math.ceil(duracao)) },
+    }));
+  const r = {
+    id, origem: 'importada', nomeArquivo: arquivo.name,
+    // O arquivo guarda quando terminou de ser gravado; o início é isso menos a duração.
+    inicio: new Date((arquivo.lastModified || Date.now()) - duracao * 1000).toISOString(),
+    duracaoSeg: duracao, status: 'processando', contexto: arquivo.name.replace(/\.[^.]+$/, ''),
+    segmentos, transcricao: '', resumo: null, erro: '',
+  };
+  registrar(`importado ${id}: ${arquivo.name} ${mime} ${Math.round(arquivo.size / 1024)} KB ${fmtDuracao(duracao)} → ${curto ? 'direto' : `${segmentos.length} janelas`}`);
+  try {
+    await salvarBloco(id, 0, 0, arquivo, mime); // guardado inteiro: é o que o player toca
+    await salvarReuniao(r);
+  } catch (e) {
+    registrar(`ERRO ao guardar o arquivo importado: ${e.message}`);
+    return avisar('Não consegui guardar esse áudio no celular (falta de espaço?).', 6000);
+  }
+  abrirDetalhe(id);
+  processar(id);
+}
+
+// Endereço do áudio importado no Google; envia de novo se ainda não foi ou se já venceu (48 h).
+let enviandoArquivo = null;
+async function arquivoNoGoogle(id) {
+  const r = await lerReuniao(id);
+  if (r.arquivoGemini && r.arquivoGemini.expira > Date.now() + 2 * 3600 * 1000) return r.arquivoGemini;
+  const audio = await lerAudio(id, 0);
+  if (!audio) throw new Error('O arquivo de áudio não está mais neste celular.');
+  enviandoArquivo = { id, mb: audio.blob.size / 1048576 };
+  if (telaAberta === id) renderDetalhe(r);
+  const t0 = Date.now();
+  try {
+    const arquivo = await enviarArquivo(audio.blob, tipoAudio(audio.mime, r.nomeArquivo), r.nomeArquivo);
+    registrar(`arquivo enviado ao Google em ${Math.round((Date.now() - t0) / 1000)} s (${enviandoArquivo.mb.toFixed(1)} MB)`);
+    const atual = await lerReuniao(id);
+    atual.arquivoGemini = arquivo;
+    await salvarReuniao(atual);
+    return arquivo;
+  } finally {
+    enviandoArquivo = null;
+  }
+}
+
+$('#btn-importar').addEventListener('click', () => $('#arquivo').click());
+$('#arquivo').addEventListener('change', (e) => {
+  const arquivo = e.target.files?.[0];
+  e.target.value = ''; // permite escolher o mesmo arquivo de novo depois
+  importar(arquivo);
+});
 
 // Uma reunião só é processada por vez: "Tentar de novo" tocado duas vezes, ou a retomada
 // automática chegando junto, não dobram as chamadas ao Gemini.
@@ -586,8 +688,9 @@ function renderDetalhe(r) {
       `<div class="etapa ${feita ? 'feita' : ''}"><span class="marca-etapa">${feita ? '✓' : ativa ? '<span class="girando">◌</span>' : '·'}</span>${texto}</div>`;
     const transcrito = total > 0 && feitos === total;
     corpo = `<div class="bloco etapas">
-      ${etapa(true, false, 'Áudio salvo no celular')}
-      ${etapa(transcrito, !transcrito, `Transcrevendo${total > 1 ? ` (${feitos} de ${total} partes)` : ''}`)}
+      ${etapa(true, false, r.origem === 'importada' ? 'Áudio importado' : 'Áudio salvo no celular')}
+      ${enviandoArquivo?.id === r.id ? etapa(false, true, `Enviando o áudio para o Google (${enviandoArquivo.mb.toFixed(1).replace('.', ',')} MB)`) : ''}
+      ${etapa(transcrito, !transcrito && enviandoArquivo?.id !== r.id, `Transcrevendo${total > 1 ? ` (${feitos} de ${total} partes)` : ''}`)}
       ${etapa(false, transcrito, 'Escrevendo a ata')}
       <p class="sub pequeno" style="margin-top:6px">Tempo: <span id="tempo-processando" data-desde="${r.processandoDesde || Date.now()}">0:00</span> · deixe o app aberto; pode ouvir a gravação enquanto isso.</p>
     </div>`;
@@ -685,7 +788,9 @@ function limparPlayer() {
 }
 
 function extensaoAudio(mime) {
-  return /mp4|m4a|aac/.test(mime || '') ? 'm4a' : /ogg/.test(mime || '') ? 'ogg' : 'webm';
+  const t = mime || '';
+  return /mp4|m4a/.test(t) ? 'm4a' : /aac/.test(t) ? 'aac' : /mp3|mpeg/.test(t) ? 'mp3'
+    : /wav/.test(t) ? 'wav' : /flac/.test(t) ? 'flac' : /ogg/.test(t) ? 'ogg' : 'webm';
 }
 
 async function montarPlayer(r) {
@@ -693,7 +798,8 @@ async function montarPlayer(r) {
   if (!r.segmentos.length) return;
   const caixa = $('#player');
   caixa.hidden = false;
-  caixa.innerHTML = `<details class="bloco" id="audios"><summary>Ouvir a gravação (${r.segmentos.length} ${r.segmentos.length === 1 ? 'parte' : 'partes'})</summary><div id="lista-audios"><p class="sub pequeno">Carregando…</p></div></details>`;
+  const varias = r.origem !== 'importada' && r.segmentos.length > 1;
+  caixa.innerHTML = `<details class="bloco" id="audios"><summary>Ouvir a gravação${varias ? ` (${r.segmentos.length} partes)` : ''}</summary><div id="lista-audios"><p class="sub pequeno">Carregando…</p></div></details>`;
   $('#audios').addEventListener('toggle', async (e) => {
     if (!e.target.open || $('#lista-audios').dataset.pronto) return;
     $('#lista-audios').dataset.pronto = '1';
@@ -707,10 +813,10 @@ async function montarPlayer(r) {
       const tipo = (a.mime || 'audio/webm').split(';')[0];
       const url = URL.createObjectURL(new Blob([a.blob], { type: tipo }));
       urlsAudio.push(url);
-      const nome = `reuniao-${data}${r.segmentos.length > 1 ? `-parte${p.n + 1}` : ''}.${extensaoAudio(tipo)}`;
+      const nome = `reuniao-${data}${varias ? `-parte${p.n + 1}` : ''}.${extensaoAudio(tipo)}`;
       const item = document.createElement('div');
       item.className = 'parte-audio';
-      item.innerHTML = `${r.segmentos.length > 1 ? `<small>Parte ${p.n + 1}</small>` : ''}
+      item.innerHTML = `${varias ? `<small>Parte ${p.n + 1}</small>` : ''}
         <audio controls preload="metadata" src="${url}"></audio>
         <a class="btn-link" href="${url}" download="${nome}">Baixar áudio (${a.blob.size < 1048576 ? Math.max(1, Math.round(a.blob.size / 1024)) + " KB" : (a.blob.size / 1048576).toFixed(1).replace(".", ",") + " MB"})</a>
         <p class="erro pequeno" hidden>Este celular não conseguiu tocar aqui. Use "Baixar áudio" e abra no app de música.</p>`;

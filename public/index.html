@@ -47,6 +47,20 @@
       <p class="dica">Toque para gravar uma reunião</p>
       <p id="aviso-mic" class="erro" hidden></p>
     </div>
+    <!-- Para gravar com a tela apagada (iPhone): grava no Gravador da Apple e traz o arquivo -->
+    <div class="importar">
+      <button id="btn-importar" class="btn secundario" type="button">Importar áudio</button>
+      <input id="arquivo" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.ogg,.opus,.webm,.flac" hidden>
+      <details class="ajuda-importar">
+        <summary>Gravar com a tela apagada ou usando outros apps</summary>
+        <ol>
+          <li>Grave a reunião no app <b>Gravador</b> do iPhone. Ele continua gravando com a tela apagada e com outros apps abertos.</li>
+          <li>No fim, toque na gravação → <b>•••</b> (ou <b>Compartilhar</b>) → <b>Salvar em Arquivos</b>.</li>
+          <li>Aqui, toque em <b>Importar áudio</b> e escolha a gravação. A ata sai igual.</li>
+        </ol>
+        <p class="sub pequeno">Também serve para áudios do WhatsApp ou de outros gravadores (m4a, mp3, wav…).</p>
+      </details>
+    </div>
     <h2 class="titulo-lista">Reuniões</h2>
     <ul id="lista" class="lista"></ul>
     <p id="lista-vazia" class="vazio" hidden>Nenhuma reunião ainda. As gravações ficam guardadas neste celular.</p>

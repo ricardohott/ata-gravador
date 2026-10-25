@@ -68,6 +68,15 @@ textarea { resize: none; max-width: 340px; }
 .btn-gravar:active { transform: scale(.96); }
 .btn-gravar .ponto { width: 40px; height: 40px; border-radius: 50%; background: #fff; }
 
+/* Importar áudio */
+.importar { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: -12px 0 28px; }
+.importar .btn { width: 100%; max-width: 320px; }
+.ajuda-importar { width: 100%; max-width: 420px; color: var(--suave); font-size: 14px; }
+.ajuda-importar summary { text-align: center; text-decoration: underline; cursor: pointer; list-style: none; }
+.ajuda-importar summary::-webkit-details-marker { display: none; }
+.ajuda-importar ol { margin: 10px 0 6px; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.ajuda-importar b { color: var(--texto); }
+
 /* Gravando */
 .estado { display: flex; align-items: center; gap: 8px; color: #fca5a5; font-weight: 600; }
 .estado.pausado { color: var(--ambar); }

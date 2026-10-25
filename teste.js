@@ -11,7 +11,7 @@ function confere(nome, cond) {
 
 // gemini.js roda num contexto isolado só para ler o esquema
 const ctx = { localStorage: { getItem: () => null }, fetch: () => {} };
-vm.runInNewContext(fs.readFileSync('public/gemini.js', 'utf8') + ';this.ESQUEMA_ATA = ESQUEMA_ATA; this.ESQUEMA_FALAS = ESQUEMA_FALAS;', ctx);
+vm.runInNewContext(fs.readFileSync('public/gemini.js', 'utf8') + ';this.ESQUEMA_ATA = ESQUEMA_ATA; this.ESQUEMA_FALAS = ESQUEMA_FALAS; this.tipoAudio = tipoAudio; this.relogio = relogio;', ctx);
 
 const servidor = app.listen(0, async () => {
   const base = `http://localhost:${servidor.address().port}`;
@@ -31,6 +31,9 @@ const servidor = app.listen(0, async () => {
     confere('esquema da ata: todo campo é obrigatório', obrigatoriosOk(ctx.ESQUEMA_ATA));
     confere('esquema das falas: todo campo é obrigatório', obrigatoriosOk(ctx.ESQUEMA_FALAS));
     confere('ata pede quem é cada pessoa', 'pessoas' in ctx.ESQUEMA_ATA.properties);
+    confere('m4a do Gravador do iPhone vira audio/mp4', ctx.tipoAudio('audio/x-m4a', 'Gravação.m4a') === 'audio/mp4');
+    confere('arquivo sem tipo é reconhecido pela extensão', ctx.tipoAudio('', 'reuniao.mp3') === 'audio/mp3');
+    confere('janela de tempo em h:mm:ss', ctx.relogio(3725) === '1:02:05');
   } catch (e) {
     falhas++; console.error(e);
   }

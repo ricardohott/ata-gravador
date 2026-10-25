@@ -102,15 +102,19 @@ class ErroGemini extends Error {
 const PRAZO_GERAR_MS = 4 * 60 * 1000;
 const PRAZO_LISTAR_MS = 20 * 1000;
 
+const PRAZO_ENVIO_MS = 15 * 60 * 1000; // enviar um arquivo grande pela rede do celular pode demorar
+
+// `caminho` relativo à API ou endereço completo; `corpo` objeto (vira JSON) ou Blob (vai como está).
 async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
+  const ehArquivo = corpo instanceof Blob;
   const controle = new AbortController();
-  const prazo = setTimeout(() => controle.abort(), corpo ? PRAZO_GERAR_MS : PRAZO_LISTAR_MS);
+  const prazo = setTimeout(() => controle.abort(), ehArquivo ? PRAZO_ENVIO_MS : corpo ? PRAZO_GERAR_MS : PRAZO_LISTAR_MS);
   let r, dados;
   try {
-    r = await fetch(`${GEMINI}/${caminho}`, {
+    r = await fetch(caminho.startsWith('https://') ? caminho : `${GEMINI}/${caminho}`, {
       method: corpo ? 'POST' : 'GET',
-      headers: { 'x-goog-api-key': chave, ...(corpo ? { 'Content-Type': 'application/json' } : {}) },
-      body: corpo ? JSON.stringify(corpo) : undefined,
+      headers: { 'x-goog-api-key': chave, ...(corpo ? { 'Content-Type': ehArquivo ? corpo.type : 'application/json' } : {}) },
+      body: corpo ? (ehArquivo ? corpo : JSON.stringify(corpo)) : undefined,
       signal: controle.signal,
     });
     dados = await r.json().catch(() => ({}));
@@ -131,7 +135,10 @@ async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
     }
     throw new ErroGemini('Muitos pedidos ao Gemini em pouco tempo. O app espera um pouco e tenta de novo.', 'minuto');
   }
-  if ((r.status === 400 && /API key|API_KEY/i.test(msg)) || r.status === 401 || r.status === 403) {
+  // 403 também chega quando um arquivo enviado venceu: esse caso não é culpa da chave.
+  const chaveRuim = (r.status === 400 && /API key|API_KEY/i.test(msg)) || r.status === 401
+    || (r.status === 403 && !/file/i.test(msg));
+  if (chaveRuim) {
     throw new ErroGemini('A chave do Gemini não foi aceita. Confira a chave em Ajustes.', 'chave');
   }
   if (r.status >= 500) {
@@ -271,7 +278,66 @@ function blobParaBase64(blob) {
 // o Gemini não ouve o áudio anterior, então é pelo assunto e pela ordem das falas
 // que ele tenta manter a mesma numeração entre os trechos.
 async function transcreverAudio(blob, mime, anterior, maiorNumero) {
-  let pedido = PEDIDO_TRANSCRICAO;
+  const audio = { inlineData: { mimeType: tipoAudio(mime), data: await blobParaBase64(blob) } };
+  return transcrever(audio, '', anterior, maiorNumero);
+}
+
+// Áudio importado e longo: o arquivo já está no Google (enviarArquivo); pede só a janela de/ate (segundos).
+async function transcreverJanela(arquivo, de, ate, anterior, maiorNumero) {
+  const audio = { fileData: { mimeType: arquivo.mime, fileUri: arquivo.uri } };
+  const janela = `Transcreva SOMENTE o trecho do áudio entre ${relogio(de)} e ${relogio(ate)} (horas:minutos:segundos).
+Comece exatamente em ${relogio(de)} e pare em ${relogio(ate)}; ignore o resto do áudio.\n\n`;
+  return transcrever(audio, janela, anterior, maiorNumero);
+}
+
+const relogio = (seg) => {
+  seg = Math.max(0, Math.round(seg));
+  const dd = (n) => String(n).padStart(2, '0');
+  return `${Math.floor(seg / 3600)}:${dd(Math.floor(seg / 60) % 60)}:${dd(seg % 60)}`;
+};
+
+// O Gemini quer o tipo do áudio sem parâmetros e com nomes que ele conhece.
+// (O Gravador do iPhone gera .m4a, que os navegadores chamam de "audio/x-m4a".)
+function tipoAudio(mime, nome = '') {
+  const t = String(mime || '').split(';')[0].toLowerCase();
+  if (/m4a|mp4|aac/.test(t) || /\.m4a$|\.mp4$/i.test(nome)) return /aac$/.test(t) ? 'audio/aac' : 'audio/mp4';
+  if (/mpeg|mp3/.test(t) || /\.mp3$/i.test(nome)) return 'audio/mp3';
+  if (/wav/.test(t) || /\.wav$/i.test(nome)) return 'audio/wav';
+  if (/ogg|opus/.test(t) || /\.(ogg|opus)$/i.test(nome)) return 'audio/ogg';
+  if (/flac/.test(t) || /\.flac$/i.test(nome)) return 'audio/flac';
+  return t || 'audio/webm';
+}
+
+// Envia o arquivo inteiro ao Google uma vez (fica lá 48 h). Depois cada janela de 15 min só
+// aponta para ele — sem isso, um áudio de 1 h passaria do limite de tamanho de um pedido.
+async function enviarArquivo(blob, mime, nome) {
+  const fronteira = 'ata' + Math.random().toString(36).slice(2);
+  const corpo = new Blob([
+    `--${fronteira}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+    JSON.stringify({ file: { display_name: nome || 'reuniao' } }),
+    `\r\n--${fronteira}\r\nContent-Type: ${mime}\r\n\r\n`,
+    blob,
+    `\r\n--${fronteira}--\r\n`,
+  ], { type: `multipart/related; boundary=${fronteira}` });
+  const base = GEMINI.replace('/v1beta', '/upload/v1beta');
+  let arquivo = (await chamarGemini(`${base}/files?uploadType=multipart`, corpo)).file;
+  // O Google precisa de alguns segundos para preparar o áudio antes de aceitar pedidos sobre ele.
+  for (let i = 0; arquivo?.state === 'PROCESSING' && i < 100; i++) {
+    await esperar(3000);
+    arquivo = await chamarGemini(arquivo.name, null);
+  }
+  if (!arquivo?.uri || (arquivo.state && arquivo.state !== 'ACTIVE')) {
+    throw new ErroGemini('O Google não conseguiu ler esse arquivo de áudio. Confira se é um áudio (ex.: .m4a do Gravador).', 'outro');
+  }
+  return {
+    uri: arquivo.uri,
+    mime: arquivo.mimeType || mime,
+    expira: Date.parse(arquivo.expirationTime) || Date.now() + 47 * 3600 * 1000,
+  };
+}
+
+async function transcrever(audio, janela, anterior, maiorNumero) {
+  let pedido = janela + PEDIDO_TRANSCRICAO;
   if (anterior) {
     pedido += `\n\nEste trecho continua uma gravação. Fim do trecho anterior (não repita):\n"""\n${anterior}\n"""
 Mantenha a numeração: quem continua o assunto acima provavelmente é a mesma pessoa.
@@ -280,7 +346,7 @@ Uma voz que ainda não apareceu recebe o próximo número livre (a partir de ${m
   const dados = await gerar({
     contents: [{
       role: 'user',
-      parts: [{ inlineData: { mimeType: (mime || 'audio/webm').split(';')[0], data: await blobParaBase64(blob) } }, { text: pedido }],
+      parts: [audio, { text: pedido }],
     }],
     generationConfig: { temperature: 0, maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_FALAS },
   }, 'transcricao');
