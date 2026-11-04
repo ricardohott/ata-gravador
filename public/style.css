@@ -139,6 +139,7 @@ audio { width: 100%; margin-top: 8px; }
 .parte-audio .btn-link { align-self: flex-start; padding: 4px 0; }
 #acoes-reuniao { padding-bottom: 24px; }
 .acoes-detalhe { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn-pdf { width: 100%; margin-bottom: 8px; }
 .enviar .acoes-detalhe .btn { flex: 1; text-align: center; text-decoration: none; }
 .whats { background: #25d366; color: #0b1a10; }
 

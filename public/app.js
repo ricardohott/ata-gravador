@@ -745,6 +745,7 @@ function renderDetalhe(r) {
     corpo += `
       <div class="bloco enviar">
         <h3>Enviar a ata</h3>
+        <button class="btn primario btn-pdf" data-acao="pdf">Enviar em PDF</button>
         <div class="acoes-detalhe">
           <a class="btn whats" href="https://wa.me/?text=${encodeURIComponent(textoParaCompartilhar(r, 'whats'))}" target="_blank" rel="noopener">WhatsApp</a>
           <a class="btn secundario" href="mailto:?subject=${encodeURIComponent(assunto)}&body=${encodeURIComponent(textoParaCompartilhar(r, 'email'))}">E-mail</a>
@@ -923,6 +924,7 @@ $('#tela-detalhe').addEventListener('click', async (e) => {
   const acao = e.target.dataset?.acao;
   if (!acao) return;
   if (acao === 'copiar') return copiarAta();
+  if (acao === 'pdf') return compartilharPdf(reuniaoAberta); // sem esperar nada: precisa sair no mesmo toque
   const id = $('#detalhe').dataset.id;
   const r = await lerReuniao(id);
   if (acao === 'tentar') processar(id);
@@ -975,6 +977,7 @@ async function copiarAta() {
 
 $('#btn-compartilhar').addEventListener('click', () => {
   const r = reuniaoAberta;
+  if (r?.resumo) return compartilharPdf(r);
   const texto = r && textoParaCompartilhar(r);
   if (!texto) return avisar('Ainda não há ata para compartilhar.');
   if (!navigator.share) return copiarAta();
@@ -1112,5 +1115,6 @@ window.addEventListener('online', retomarPassageiras);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') retomarPassageiras(); });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+prepararPdf();
 navigator.storage?.persist?.(); // pede ao navegador para não apagar as gravações quando faltar espaço
 iniciar();
