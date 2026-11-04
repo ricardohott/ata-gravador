@@ -722,7 +722,7 @@ function renderDetalhe(r) {
     corpo = `<div class="bloco etapas">
       ${etapa(true, false, r.origem === 'importada' ? 'Áudio importado' : 'Áudio salvo no celular')}
       ${enviandoArquivo?.id === r.id ? etapa(false, true, `Enviando o áudio para o Google (${enviandoArquivo.mb.toFixed(1).replace('.', ',')} MB)`) : ''}
-      ${etapa(transcrito, !transcrito && enviandoArquivo?.id !== r.id, `Transcrevendo${total > 1 ? ` (${feitos} de ${total} partes)` : ''}`)}
+      ${etapa(transcrito, !transcrito && enviandoArquivo?.id !== r.id, `Ouvindo a reunião${total > 1 ? ` (${feitos} de ${total} partes)` : ''}`)}
       ${etapa(false, transcrito, 'Escrevendo a ata')}
       <p class="sub pequeno" style="margin-top:6px">Tempo: <span id="tempo-processando" data-desde="${r.processandoDesde || Date.now()}">0:00</span> · deixe o app aberto; pode ouvir a gravação enquanto isso.</p>
     </div>`;
@@ -730,7 +730,7 @@ function renderDetalhe(r) {
     corpo = `<div class="bloco">
       <p class="erro">${esc(r.erro || 'Não foi possível processar.')}</p>
       <p class="sub" style="margin-top:8px">${r.erroTipo === 'limite' && r.limiteAte
-    ? `${feitos} de ${total} ${total === 1 ? 'parte transcrita' : 'partes transcritas'} e salvas. Renova por volta de ${new Date(r.limiteAte).toLocaleString('pt-BR', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}: abra o app depois disso e ele continua de onde parou.`
+    ? `${feitos} de ${total} ${total === 1 ? 'parte pronta e salva' : 'partes prontas e salvas'}. Renova por volta de ${new Date(r.limiteAte).toLocaleString('pt-BR', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}: abra o app depois disso e ele continua de onde parou.`
     : 'A gravação continua guardada neste celular.'}</p>
       <div class="acoes-detalhe" style="margin-top:12px"><button class="btn primario" data-acao="tentar">Tentar de novo</button>
         ${r.erroTipo === 'chave' ? '<button class="btn secundario" data-acao="ajustes">Trocar a chave</button>' : ''}
@@ -763,12 +763,12 @@ function renderDetalhe(r) {
   const falas = falasDe(r);
   const pessoas = pessoasDe(r);
   const naReserva = r.segmentos.filter((p) => p.reserva).length;
-  if (naReserva) corpo += `<p class="sub pequeno">${naReserva} de ${total} ${total === 1 ? 'parte foi transcrita' : 'partes foram transcritas'} pelo modelo reserva, que não separa quem fala.</p>`;
-  if (pessoas.length && r.status !== 'gravando') {
+  let extras = naReserva ? `<p class="sub pequeno">${naReserva} de ${total} ${total === 1 ? 'parte foi transcrita' : 'partes foram transcritas'} pelo modelo reserva, que não separa quem fala.</p>` : '';
+  if (pessoas.length) {
     const papel = (n) => (s?.pessoas || []).find((p) => p.numero === n)?.papel || '';
     const qtd = (n) => falas.filter((f) => f.pessoa === n).length;
-    corpo += `
-      <div class="bloco">
+    extras += `
+      <div>
         <h3>Quem falou</h3>
         <p class="sub pequeno" style="margin-bottom:10px">Escreva o nome de quem você reconhecer. A ata é refeita com os nomes.</p>
         <form id="form-nomes" class="pessoas">
@@ -788,14 +788,20 @@ function renderDetalhe(r) {
       ? `<div class="fala"><b class="t${(f.pessoa - 1) % 8}">${esc(nomeDe(r, f.pessoa))}</b> ${esc(f.texto)}</div>`
       : `<div class="fala">${esc(f.texto)}</div>`)).join('')
     : esc('Ainda não transcrito.');
-  corpo += `
-    <div class="bloco">
-      <details data-chave="transcricao"><summary>Transcrição completa</summary><div class="transcricao">${transcricaoHtml}</div></details>
-    </div>
-`;
+  // A ata é o que importa: o resto fica fechado, à mão para corrigir nomes ou conferir uma fala.
+  if (['pronta', 'erro'].includes(r.status) && falas.length) {
+    corpo += `
+    <details class="bloco" data-chave="detalhes">
+      <summary>Mais detalhes</summary>
+      <div class="mais-detalhes">
+        ${extras}
+        <details data-chave="transcricao"><summary>Transcrição completa</summary><div class="transcricao">${transcricaoHtml}</div></details>
+        <button class="btn secundario" data-acao="retranscrever">Refazer a transcrição</button>
+      </div>
+    </details>`;
+  }
   $('#acoes-reuniao').innerHTML = `
       ${r.status === 'pronta' ? '<button class="btn secundario" data-acao="refazer">Refazer a ata</button>' : ''}
-      ${['pronta', 'erro'].includes(r.status) && r.segmentos.length ? '<button class="btn secundario" data-acao="retranscrever">Refazer a transcrição</button>' : ''}
       <button class="btn secundario" data-acao="apagar">Apagar reunião</button>`;
 
   // Redesenhar não pode fechar o que a pessoa abriu (ex.: a transcrição, durante o processamento).

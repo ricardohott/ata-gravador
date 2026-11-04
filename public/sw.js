@@ -1,6 +1,6 @@
 // Abre o app mesmo sem internet (a gravação não depende de rede).
 // Rede primeiro, cache como reserva: atualização publicada chega sem precisar limpar nada.
-const CACHE = 'ata-v16';
+const CACHE = 'ata-v17';
 const ARQUIVOS = ['./', 'index.html', 'style.css', 'gemini.js', 'groq.js', 'm4a.js', 'app.js', 'manifest.json', 'icon.svg', 'marca.svg', 'icon-192.png'];
 
 self.addEventListener('install', (e) => {

@@ -118,6 +118,7 @@ textarea { resize: none; max-width: 340px; }
 .girando { display: inline-block; animation: gira 1s linear infinite; }
 @keyframes gira { to { transform: rotate(360deg); } }
 details summary { cursor: pointer; color: var(--suave); }
+.mais-detalhes { display: flex; flex-direction: column; gap: 16px; margin-top: 14px; }
 .transcricao { color: #cbd5e1; font-size: 15px; margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
 .fala { white-space: pre-wrap; }
 .fala b { font-weight: 700; margin-right: 4px; }
