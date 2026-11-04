@@ -739,18 +739,13 @@ function renderDetalhe(r) {
   }
 
   if (s) {
-    // Links de verdade (<a>), não script: é o caminho que o celular sempre abre,
-    // inclusive no iPhone, onde o compartilhar falhava depois de ler o banco.
-    const assunto = `Ata: ${s.titulo}`;
+    // Enviar é sempre o PDF. Link de WhatsApp ou e-mail só leva texto, nunca arquivo anexado:
+    // quem anexa é o compartilhar do celular, onde a pessoa escolhe o app.
     corpo += `
       <div class="bloco enviar">
         <h3>Enviar a ata</h3>
-        <button class="btn primario btn-pdf" data-acao="pdf">Enviar em PDF</button>
-        <div class="acoes-detalhe">
-          <a class="btn whats" href="https://wa.me/?text=${encodeURIComponent(textoParaCompartilhar(r, 'whats'))}" target="_blank" rel="noopener">WhatsApp</a>
-          <a class="btn secundario" href="mailto:?subject=${encodeURIComponent(assunto)}&body=${encodeURIComponent(textoParaCompartilhar(r, 'email'))}">E-mail</a>
-          <button class="btn secundario" data-acao="copiar">Copiar</button>
-        </div>
+        <button class="btn primario btn-pdf" data-acao="pdf">Enviar ata em PDF</button>
+        <p class="sub pequeno">Escolha WhatsApp, e-mail ou outro app no menu que abrir. <button class="btn-link" data-acao="copiar">Copiar texto</button></p>
       </div>
       <div class="bloco"><h3>Resumo</h3><p>${esc(s.resumo)}</p>
         ${participantes(r) ? `<p class="sub" style="margin-top:8px">Participantes: ${esc(participantes(r))}</p>` : ''}</div>
@@ -945,11 +940,11 @@ $('#tela-detalhe').addEventListener('click', async (e) => {
   }
 });
 
-// A ata inteira em texto. No WhatsApp, *asterisco* vira negrito; no e-mail vira MAIÚSCULA.
-function textoParaCompartilhar(r, formato = 'whats') {
+// A ata em texto, para o "Copiar texto". Asterisco vira negrito ao colar no WhatsApp.
+function textoParaCompartilhar(r) {
   const s = r.resumo;
   if (!s) return r.transcricao || '';
-  const titulo = (t) => (formato === 'whats' ? `*${t}*` : t.toUpperCase());
+  const titulo = (t) => `*${t}*`;
   // Toda parte sai com título, mesmo vazia: a ata fica sempre com a mesma divisão.
   const secao = (nome, arr, vazio) => `\n${titulo(nome)}\n${arr?.length ? arr.map((i) => `• ${i}`).join('\n') : vazio}`;
   const partes = [
@@ -976,15 +971,7 @@ async function copiarAta() {
 }
 
 $('#btn-compartilhar').addEventListener('click', () => {
-  const r = reuniaoAberta;
-  if (r?.resumo) return compartilharPdf(r);
-  const texto = r && textoParaCompartilhar(r);
-  if (!texto) return avisar('Ainda não há ata para compartilhar.');
-  if (!navigator.share) return copiarAta();
-  // Sem await antes: o navegador só abre o menu de compartilhar dentro do próprio toque.
-  navigator.share({ text: texto }).catch((e) => {
-    if (e.name !== 'AbortError') copiarAta(); // falhou de verdade (não foi cancelado): copia
-  });
+  compartilharPdf(reuniaoAberta); // sem esperar nada: o menu só abre dentro do próprio toque
 });
 
 // ---------- início ----------

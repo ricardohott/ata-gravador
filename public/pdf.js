@@ -171,7 +171,7 @@ function compartilharPdf(r) {
   }
   registrar(`PDF gerado: ${Math.round(arquivo.size / 1024)} KB`);
   if (navigator.canShare?.({ files: [arquivo] })) {
-    navigator.share({ files: [arquivo], title: `Ata: ${r.resumo.titulo}` }).catch((e) => {
+    navigator.share({ files: [arquivo] }).catch((e) => {
       if (e.name === 'AbortError') return; // a pessoa cancelou
       registrar(`compartilhar PDF falhou: ${e.name} ${e.message}`);
       baixarPdf(arquivo);
