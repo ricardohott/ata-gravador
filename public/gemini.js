@@ -76,7 +76,11 @@ Separe por quem fala, prestando atenção na voz (timbre, altura, jeito de falar
 - Se duas pessoas falam ao mesmo tempo, transcreva o que der, cada uma com o seu número.
 - Na dúvida entre duas vozes parecidas, prefira manter o número de quem vinha falando.
 
-Não resuma, não comente, não traduza. Se não houver fala, devolva a lista vazia.`;
+Regras do texto:
+- Escreva somente o que foi realmente dito. Nunca invente, complete ou deduza palavras.
+- Trecho que não deu para entender: escreva [inaudível].
+- Repita uma frase só se ela foi de fato repetida na gravação.
+- Não resuma, não comente, não traduza. Se não houver fala, devolva a lista vazia.`;
 
 const PEDIDO_ATA = `Você recebe a transcrição automática de uma reunião presencial, em português do Brasil,
 separada por quem fala ("Pessoa 1", "Pessoa 2"... ou o nome, quando já se sabe).
@@ -146,6 +150,7 @@ async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
   }
   if (r.status === 404) {
     localStorage.removeItem('ata-modelo'); // o modelo saiu do ar: a próxima tentativa escolhe outro
+    localStorage.removeItem('ata-modelos');
     throw new ErroGemini('O modelo do Gemini mudou de nome. Toque em "Tentar de novo".', 'modelo');
   }
   throw Object.assign(new ErroGemini(`O Gemini recusou o pedido (${r.status}). ${msg}`.trim(), 'outro'), { status: r.status, detalhe: msg });
@@ -211,7 +216,36 @@ async function listarModelos(chave = chaveGemini()) {
 async function escolherModelo(chave) {
   const modelos = await listarModelos(chave);
   localStorage.setItem('ata-reservas', JSON.stringify(modelos.slice(1, 3)));
+  localStorage.setItem('ata-modelos', JSON.stringify(modelos));
   return modelos[0];
+}
+
+// Para ÁUDIO a ordem é outra: há relatos recentes de os Flash 3.7/3.8 devolverem vazio de forma
+// intermitente em áudio comum (promptFeedback.blockReason=OTHER), o que não acontece no 3.6 e no 2.5.
+// Eles ficam no fim da fila, como reserva. O texto da ata não sofre com isso e segue na ordem normal.
+function ordemParaAudio(modelos) {
+  const nota = (m) => {
+    if (m === 'gemini-3.6-flash') return 0;
+    if (m === 'gemini-2.5-flash') return 1;
+    if (/lite/.test(m)) return 3;
+    const versao = parseFloat(m.replace(/^gemini-/, ''));
+    return versao && versao < 3.7 ? 2 : 4; // 3.7, 3.8 e o apelido flash-latest
+  };
+  return modelos.map((m, i) => [nota(m), i, m]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
+}
+
+async function modelosParaAudio() {
+  let modelos = null;
+  try { modelos = JSON.parse(localStorage.getItem('ata-modelos') || 'null'); } catch { /* busca de novo */ }
+  if (!Array.isArray(modelos) || !modelos.length) {
+    try {
+      modelos = await listarModelos();
+      localStorage.setItem('ata-modelos', JSON.stringify(modelos));
+    } catch {
+      modelos = [modeloGemini(), ...(await modelosReserva())];
+    }
+  }
+  return ordemParaAudio(modelos).slice(0, 4);
 }
 
 async function modelosReserva() {
@@ -236,20 +270,27 @@ const esperar = (ms) => new Promise((ok) => setTimeout(ok, ms));
 // para a etapa seguinte (ex.: a ata depois da transcrição) não esperar por ele de novo.
 const ocupadoAte = {};
 
-async function gerar(corpo, etapa) {
-  const todos = [modeloGemini(), ...(await modelosReserva())];
+// `interpretar` valida a resposta aqui dentro: resposta vazia ou quebrada conta como falha do
+// modelo (tenta de novo e depois troca), em vez de virar erro para a pessoa.
+async function gerar(corpo, etapa, interpretar) {
+  const todos = etapa === 'transcricao' ? await modelosParaAudio() : [modeloGemini(), ...(await modelosReserva())];
   const livre = (m) => !(ocupadoAte[m] > Date.now());
   const modelos = [...todos.filter(livre), ...todos.filter((m) => !livre(m))];
   let ultimo;
   for (const modelo of modelos) {
+    let vazias = 0;
     for (const espera of [0, 3000, 8000]) {
       if (espera) await esperar(espera);
       try {
-        return await chamarComPoucoPensamento(modelo, corpo, etapa);
+        const resposta = interpretar(await chamarComPoucoPensamento(modelo, corpo, etapa));
+        if (typeof registrar === 'function') registrar(`${etapa} respondida por ${modelo}`);
+        return resposta;
       } catch (e) {
         ultimo = e;
+        if (typeof registrar === 'function') registrar(`${modelo} (${etapa}): ${e.tipo || 'erro'} ${e.detalhe || e.message}`);
         if (e.tipo === 'minuto') { await esperar(30000); continue; } // limite por minuto: espera e repete
-        if (e.tipo === 'modelo') break;                              // modelo saiu do ar: vai para o próximo
+        if (e.tipo === 'modelo' || e.tipo === 'limite') break;       // sem esse modelo: vai para o próximo
+        if (e.tipo === 'vazia') { if (++vazias >= 2) break; continue; } // insistir pouco: troca de modelo
         if (e.tipo !== 'ocupado') throw e;
       }
     }
@@ -258,11 +299,52 @@ async function gerar(corpo, etapa) {
   throw ultimo;
 }
 
+const respostaVazia = (detalhe) => Object.assign(
+  new ErroGemini('O Gemini não conseguiu responder este trecho agora. A gravação está salva e o app tenta de novo sozinho.', 'vazia'),
+  { detalhe },
+);
+
 function textoDaResposta(dados) {
   const c = dados.candidates?.[0];
-  if (!c) throw new ErroGemini('O Gemini não devolveu resposta para este trecho.', 'outro');
-  if (c.finishReason === 'MAX_TOKENS') throw new ErroGemini('A resposta do Gemini veio cortada por ser longa demais.', 'outro');
-  return (c.content?.parts || []).map((p) => p.text || '').join('').trim();
+  if (!c) throw respostaVazia(`sem resposta (${dados.promptFeedback?.blockReason || 'sem motivo'})`);
+  const texto = (c.content?.parts || []).map((p) => p.text || '').join('').trim();
+  // MAX_TOKENS em transcrição costuma ser o modelo preso repetindo a mesma frase.
+  if (c.finishReason === 'MAX_TOKENS') throw respostaVazia('resposta cortada (MAX_TOKENS)');
+  if (!texto) throw respostaVazia(`texto vazio (${c.finishReason || 'sem motivo'})`);
+  return texto;
+}
+
+function lerJson(dados) {
+  const texto = textoDaResposta(dados);
+  try { return JSON.parse(texto); } catch { throw respostaVazia('JSON incompleto'); }
+}
+
+// Modelo "preso" repete a mesma frase dezenas de vezes. Frases curtas ("sim, sim") não contam.
+function temRepeticao(falas) {
+  const vezes = {};
+  for (const f of falas) {
+    for (const frase of String(f.texto || '').toLowerCase().split(/[.!?]+\s*/)) {
+      if (frase.trim().length >= 20) vezes[frase.trim()] = (vezes[frase.trim()] || 0) + 1;
+    }
+  }
+  return Object.values(vezes).some((n) => n >= 5);
+}
+
+function lerFalas(dados) {
+  const { falas } = lerJson(dados);
+  if (!Array.isArray(falas)) throw respostaVazia('resposta sem a lista de falas');
+  if (temRepeticao(falas)) throw respostaVazia('frase repetida em laço');
+  // Junta falas seguidas da mesma pessoa e descarta as vazias.
+  const juntas = [];
+  for (const f of falas) {
+    const texto = String(f.texto || '').trim();
+    const pessoa = Math.max(1, Math.round(Number(f.pessoa) || 1));
+    if (!texto) continue;
+    const ultima = juntas[juntas.length - 1];
+    if (ultima && ultima.pessoa === pessoa) ultima.texto += ' ' + texto;
+    else juntas.push({ pessoa, texto });
+  }
+  return juntas;
 }
 
 function blobParaBase64(blob) {
@@ -300,7 +382,7 @@ const relogio = (seg) => {
 // (O Gravador do iPhone gera .m4a, que os navegadores chamam de "audio/x-m4a".)
 function tipoAudio(mime, nome = '') {
   const t = String(mime || '').split(';')[0].toLowerCase();
-  if (/m4a|mp4|aac/.test(t) || /\.m4a$|\.mp4$/i.test(nome)) return /aac$/.test(t) ? 'audio/aac' : 'audio/mp4';
+  if (/m4a|mp4|aac/.test(t) || /\.m4a$|\.mp4$/i.test(nome)) return /aac$/.test(t) ? 'audio/aac' : 'audio/m4a';
   if (/mpeg|mp3/.test(t) || /\.mp3$/i.test(nome)) return 'audio/mp3';
   if (/wav/.test(t) || /\.wav$/i.test(nome)) return 'audio/wav';
   if (/ogg|opus/.test(t) || /\.(ogg|opus)$/i.test(nome)) return 'audio/ogg';
@@ -343,31 +425,10 @@ async function transcrever(audio, janela, anterior, maiorNumero) {
 Mantenha a numeração: quem continua o assunto acima provavelmente é a mesma pessoa.
 Uma voz que ainda não apareceu recebe o próximo número livre (a partir de ${maiorNumero + 1}).`;
   }
-  const dados = await gerar({
-    contents: [{
-      role: 'user',
-      parts: [audio, { text: pedido }],
-    }],
-    generationConfig: { temperature: 0, maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_FALAS },
-  }, 'transcricao');
-  let falas;
-  try {
-    falas = JSON.parse(textoDaResposta(dados)).falas;
-  } catch (e) {
-    if (e instanceof ErroGemini) throw e;
-    throw new ErroGemini('A transcrição veio cortada. Toque em "Tentar de novo".', 'outro');
-  }
-  // Junta falas seguidas da mesma pessoa e descarta as vazias.
-  const juntas = [];
-  for (const f of falas || []) {
-    const texto = String(f.texto || '').trim();
-    const pessoa = Math.max(1, Math.round(Number(f.pessoa) || 1));
-    if (!texto) continue;
-    const ultima = juntas[juntas.length - 1];
-    if (ultima && ultima.pessoa === pessoa) ultima.texto += ' ' + texto;
-    else juntas.push({ pessoa, texto });
-  }
-  return juntas;
+  return gerar({
+    contents: [{ role: 'user', parts: [audio, { text: pedido }] }],
+    generationConfig: { maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_FALAS },
+  }, 'transcricao', lerFalas);
 }
 
 async function escreverAta({ transcricao, inicio, duracaoSeg, contexto }) {
@@ -376,15 +437,9 @@ async function escreverAta({ transcricao, inicio, duracaoSeg, contexto }) {
     duracaoSeg && `Duração: ${Math.max(1, Math.round(duracaoSeg / 60))} min`,
     contexto && `Anotação de quem gravou: ${contexto}`,
   ].filter(Boolean).join('\n');
-  const dados = await gerar({
+  return gerar({
     systemInstruction: { parts: [{ text: PEDIDO_ATA }] },
     contents: [{ role: 'user', parts: [{ text: `${cabecalho}\n\n<transcricao>\n${transcricao}\n</transcricao>` }] }],
     generationConfig: { maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_ATA },
-  }, 'ata');
-  try {
-    return JSON.parse(textoDaResposta(dados));
-  } catch (e) {
-    if (e instanceof ErroGemini) throw e;
-    throw new ErroGemini('A ata veio incompleta. Toque em "Tentar de novo".', 'outro');
-  }
+  }, 'ata', lerJson);
 }

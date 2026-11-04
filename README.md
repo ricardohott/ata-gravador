@@ -7,7 +7,8 @@ App de celular (PWA) que grava reuniões presenciais, transcreve e escreve a ata
 - Gravações ficam no IndexedDB do celular: partes de 15 min, cada bloco de 10 s salvo como registro próprio (chave `id:parte:bloco`).
 - Nenhuma espera é sem fim (`comPrazo`): parar o gravador, salvar e chamar o Gemini têm prazo; Encerrar sempre termina.
 - Microfone tomado (ligação) é detectado e retomado sozinho. Ajustes → "Copiar relatório de problemas" traz o diagnóstico.
-- "Importar áudio": arquivo do Gravador do iPhone (ou outro). Até ~14 MB vai junto do pedido; maior vai uma vez pela Files API do Gemini e é transcrito em janelas de 15 min.
+- "Importar áudio": arquivo do Gravador do iPhone (ou outro). .m4a AAC é cortado de verdade em partes de até 15 min (`public/m4a.js`, sem decodificar); o que não dá para cortar vai pela Files API e é pedido em janelas de tempo (menos preciso).
+- Áudio evita Gemini Flash 3.7/3.8 (relatos de blockReason=OTHER): prefere 3.6 e 2.5. Resposta vazia, cortada ou em laço troca de modelo em vez de virar erro.
 - A transcrição separa quem fala ("Pessoa 1, 2..."); a ata tenta descobrir os nomes, e dá para renomear na tela da reunião.
 
 Testar no computador: `npm install`, `npm start` → http://localhost:4180. Conferir: `npm test`.

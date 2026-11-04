@@ -477,8 +477,13 @@ function transcreverPendentes(id) {
       const maior = antes.reduce((m, f) => Math.max(m, f.pessoa), 0);
       const t0 = Date.now();
       let falas;
-      if (seg.janela) {
-        // Áudio importado longo: o arquivo vai uma vez para o Google e cada parte é uma janela de tempo.
+      const trecho = seg.janela ? await trechoCortado(id, seg.janela) : null;
+      if (trecho) {
+        falas = await transcreverAudio(trecho, 'audio/aac', anterior, maior);
+        registrar(`trecho ${seg.n} (${fmtDuracao(seg.janela.de)}–${fmtDuracao(seg.janela.ate)}) transcrito em ${Math.round((Date.now() - t0) / 1000)} s (${Math.round(trecho.size / 1024)} KB, ${falas.length} falas)`);
+      } else if (seg.janela) {
+        // Áudio que não dá para cortar aqui: vai inteiro para o Google e cada parte é uma janela de tempo.
+        // É menos preciso (o Gemini pode errar os horários), por isso é só a alternativa.
         try {
           falas = await transcreverJanela(await arquivoNoGoogle(id), seg.janela.de, seg.janela.ate, anterior, maior);
         } catch (e) {
@@ -535,6 +540,25 @@ function duracaoDoArquivo(arquivo) {
   });
 }
 
+// Partes de até 15 min e que caibam num pedido: gravação em qualidade alta pesa mais por minuto.
+function dividirEmJanelas(duracao, bytes) {
+  const partes = Math.max(Math.ceil(duracao / JANELA_SEG), Math.ceil(bytes / DIRETO_ATE_BYTES));
+  const tam = duracao / partes;
+  return Array.from({ length: partes }, (_, n) => ({
+    de: Math.round(n * tam),
+    ate: n === partes - 1 ? Math.ceil(duracao) : Math.round((n + 1) * tam),
+  }));
+}
+
+// Trecho cortado de verdade do .m4a. null se o arquivo não for AAC comum (usa o envio ao Google).
+let indiceAberto = { id: null, indice: null };
+async function trechoCortado(id, janela) {
+  const audio = await lerAudio(id, 0);
+  if (!audio || !/mp4|m4a/.test(audio.mime || '')) return null;
+  if (indiceAberto.id !== id) indiceAberto = { id, indice: await lerIndiceM4a(audio.blob) };
+  return indiceAberto.indice ? trechoAac(audio.blob, indiceAberto.indice, janela.de, janela.ate) : null;
+}
+
 async function importar(arquivo) {
   if (!arquivo) return;
   if (!/^audio\//.test(arquivo.type) && !/\.(m4a|mp3|wav|aac|ogg|opus|webm|flac|mp4)$/i.test(arquivo.name)) {
@@ -546,10 +570,7 @@ async function importar(arquivo) {
   const curto = arquivo.size <= DIRETO_ATE_BYTES && duracao <= JANELA_SEG + 60;
   const segmentos = curto
     ? [{ n: 0, mime, texto: null, fechado: true }]
-    : Array.from({ length: Math.ceil(duracao / JANELA_SEG) }, (_, n) => ({
-      n, mime, texto: null, fechado: true,
-      janela: { de: n * JANELA_SEG, ate: Math.min((n + 1) * JANELA_SEG, Math.ceil(duracao)) },
-    }));
+    : dividirEmJanelas(duracao, arquivo.size).map((janela, n) => ({ n, mime, texto: null, fechado: true, janela }));
   const r = {
     id, origem: 'importada', nomeArquivo: arquivo.name,
     // O arquivo guarda quando terminou de ser gravado; o início é isso menos a duração.
@@ -758,6 +779,7 @@ function renderDetalhe(r) {
 `;
   $('#acoes-reuniao').innerHTML = `
       ${r.status === 'pronta' ? '<button class="btn secundario" data-acao="refazer">Refazer a ata</button>' : ''}
+      ${['pronta', 'erro'].includes(r.status) && r.segmentos.length ? '<button class="btn secundario" data-acao="retranscrever">Refazer a transcrição</button>' : ''}
       <button class="btn secundario" data-acao="apagar">Apagar reunião</button>`;
 
   // Redesenhar não pode fechar o que a pessoa abriu (ex.: a transcrição, durante o processamento).
@@ -884,6 +906,15 @@ $('#tela-detalhe').addEventListener('click', async (e) => {
   if (acao === 'tentar') processar(id);
   if (acao === 'ajustes') abrirAjustes();
   if (acao === 'refazer') { r.resumo = null; await salvarReuniao(r); processar(id); }
+  if (acao === 'retranscrever') {
+    // A numeração de quem fala pode mudar, então os nomes da transcrição antiga não valem mais.
+    const digitados = Object.keys(r.nomes || {}).some((n) => !r.nomesAuto?.[n]);
+    if (digitados && !confirm('Refazer a transcrição apaga os nomes que você escreveu nesta reunião. Continuar?')) return;
+    for (const p of r.segmentos) { p.texto = null; delete p.falas; }
+    Object.assign(r, { resumo: null, transcricao: '', nomes: {}, nomesAuto: {} });
+    await salvarReuniao(r);
+    processar(id);
+  }
   if (acao === 'apagar' && confirm('Apagar esta reunião e o áudio dela deste celular?')) {
     await apagarReuniao(r);
     voltar();
@@ -1022,7 +1053,7 @@ async function retomarPassageiras() {
   try {
     for (const r of await todasReunioes()) {
       // A segunda condição pega erros 5xx gravados por versões antigas do app, sem o tipo.
-      const passageira = ['ocupado', 'rede', 'minuto'].includes(r.erroTipo) || /\(5\d\d\)/.test(r.erro || '')
+      const passageira = ['ocupado', 'rede', 'minuto', 'vazia'].includes(r.erroTipo) || /\(5\d\d\)/.test(r.erro || '')
         || (r.erroTipo === 'limite' && Date.now() - (r.erroEm || 0) > 3 * 3600 * 1000); // limite diário: tenta horas depois
       if (r.status === 'erro' && passageira && r.segmentos.length) await processar(r.id);
     }
