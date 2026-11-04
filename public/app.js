@@ -662,6 +662,7 @@ async function processarAgora(id) {
   } catch (e) {
     r = (await lerReuniao(id)) || r;
     r.status = 'erro'; r.erro = e.message; r.erroTipo = e.tipo || ''; r.erroEm = Date.now();
+    if (e.tipo === 'limite') r.limiteAte = proximaRenovacao();
     registrar(`ERRO processando ${id}: [${r.erroTipo}] ${e.message}`);
   }
   await salvarReuniao(r);
@@ -718,7 +719,9 @@ function renderDetalhe(r) {
   } else if (r.status === 'erro') {
     corpo = `<div class="bloco">
       <p class="erro">${esc(r.erro || 'Não foi possível processar.')}</p>
-      <p class="sub" style="margin-top:8px">A gravação continua guardada neste celular.</p>
+      <p class="sub" style="margin-top:8px">${r.erroTipo === 'limite' && r.limiteAte
+    ? `${feitos} de ${total} ${total === 1 ? 'parte transcrita' : 'partes transcritas'} e salvas. Renova por volta de ${new Date(r.limiteAte).toLocaleString('pt-BR', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}: abra o app depois disso e ele continua de onde parou.`
+    : 'A gravação continua guardada neste celular.'}</p>
       <div class="acoes-detalhe" style="margin-top:12px"><button class="btn primario" data-acao="tentar">Tentar de novo</button>
         ${r.erroTipo === 'chave' ? '<button class="btn secundario" data-acao="ajustes">Trocar a chave</button>' : ''}</div>
     </div>`;
@@ -1013,6 +1016,7 @@ $('#form-entrar').addEventListener('submit', async (e) => {
     // Testa a chave de verdade e já descobre qual modelo gratuito usar.
     const modelo = await escolherModelo(chave);
     localStorage.setItem('ata-chave', chave);
+    localStorage.removeItem('ata-esgotados'); // chave nova, cota nova
     localStorage.setItem('ata-modelo', modelo);
     // Reuniões que falharam por causa da chave voltam para a fila.
     for (const r of await todasReunioes()) if (r.status === 'erro' && r.segmentos.length) processar(r.id);
@@ -1054,7 +1058,7 @@ async function retomarPassageiras() {
     for (const r of await todasReunioes()) {
       // A segunda condição pega erros 5xx gravados por versões antigas do app, sem o tipo.
       const passageira = ['ocupado', 'rede', 'minuto', 'vazia'].includes(r.erroTipo) || /\(5\d\d\)/.test(r.erro || '')
-        || (r.erroTipo === 'limite' && Date.now() - (r.erroEm || 0) > 3 * 3600 * 1000); // limite diário: tenta horas depois
+        || (r.erroTipo === 'limite' && Date.now() > (r.limiteAte || (r.erroEm || 0) + 3 * 3600 * 1000)); // só depois de renovar
       if (r.status === 'erro' && passageira && r.segmentos.length) await processar(r.id);
     }
   } finally {

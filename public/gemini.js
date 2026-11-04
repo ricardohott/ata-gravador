@@ -101,6 +101,36 @@ class ErroGemini extends Error {
   constructor(msg, tipo) { super(msg); this.tipo = tipo; }
 }
 
+// O Google diz qual limite estourou nos detalhes do erro, não no texto: quotaId traz
+// "...PerDay..." ou "...PerMinute...", e RetryInfo diz quanto esperar.
+function lerLimite(erro = {}) {
+  const detalhes = erro.details || [];
+  const ids = detalhes.flatMap((d) => d.violations || []).map((v) => v.quotaId || '').join(' ');
+  const diario = /per.?day|daily|diári/i.test(`${ids} ${erro.message || ''}`);
+  const espera = detalhes.map((d) => d.retryDelay).find(Boolean) || (erro.message || '').match(/retry in ([\d.]+)\s*s/i)?.[1];
+  return { diario, esperaMs: parseFloat(espera) ? (parseFloat(espera) + 1) * 1000 : 30000 };
+}
+
+// O limite diário renova à meia-noite no horário do Pacífico.
+function proximaRenovacao(agora = Date.now()) {
+  const pacifico = (t) => new Date(new Date(t).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const local = pacifico(agora);
+  const meiaNoite = new Date(local);
+  meiaNoite.setHours(24, 0, 0, 0);
+  return agora + (meiaNoite - local);
+}
+
+// Modelos sem cota até a renovação: cada modelo tem o próprio limite, então os outros podem seguir,
+// e insistir num esgotado só gastaria tempo.
+function esgotados() {
+  try { return JSON.parse(localStorage.getItem('ata-esgotados') || '{}'); } catch { return {}; }
+}
+function marcarEsgotado(modelo) {
+  const lista = esgotados();
+  lista[modelo] = proximaRenovacao();
+  localStorage.setItem('ata-esgotados', JSON.stringify(lista));
+}
+
 // Prazo máximo por pedido: 15 min de áudio costumam levar menos de 1 min no Gemini.
 // Sem prazo, uma conexão que fica pendurada deixaria "Transcrevendo" para sempre.
 const PRAZO_GERAR_MS = 4 * 60 * 1000;
@@ -133,11 +163,11 @@ async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
   if (r.ok) return dados;
   const msg = dados.error?.message || '';
   if (r.status === 429) {
-    // Limite por minuto passa sozinho em segundos; o diário só no dia seguinte.
-    if (/per.?day|daily|diári/i.test(msg)) {
-      throw new ErroGemini('O limite gratuito diário do Gemini acabou. A gravação está salva; o limite renova amanhã e o app refaz a ata quando você abrir.', 'limite');
+    const { diario, esperaMs } = lerLimite(dados.error);
+    if (diario) {
+      throw new ErroGemini('O limite gratuito de hoje do Gemini acabou.', 'limite');
     }
-    throw new ErroGemini('Muitos pedidos ao Gemini em pouco tempo. O app espera um pouco e tenta de novo.', 'minuto');
+    throw Object.assign(new ErroGemini('Muitos pedidos ao Gemini em pouco tempo. O app espera um pouco e tenta de novo.', 'minuto'), { esperaMs });
   }
   // 403 também chega quando um arquivo enviado venceu: esse caso não é culpa da chave.
   const chaveRuim = (r.status === 400 && /API key|API_KEY/i.test(msg)) || r.status === 401
@@ -274,8 +304,11 @@ const ocupadoAte = {};
 // modelo (tenta de novo e depois troca), em vez de virar erro para a pessoa.
 async function gerar(corpo, etapa, interpretar) {
   const todos = etapa === 'transcricao' ? await modelosParaAudio() : [modeloGemini(), ...(await modelosReserva())];
+  const semCota = esgotados();
+  const comCota = todos.filter((m) => !(semCota[m] > Date.now()));
+  if (!comCota.length) throw new ErroGemini('O limite gratuito de hoje do Gemini acabou.', 'limite');
   const livre = (m) => !(ocupadoAte[m] > Date.now());
-  const modelos = [...todos.filter(livre), ...todos.filter((m) => !livre(m))];
+  const modelos = [...comCota.filter(livre), ...comCota.filter((m) => !livre(m))];
   let ultimo;
   for (const modelo of modelos) {
     let vazias = 0;
@@ -288,7 +321,8 @@ async function gerar(corpo, etapa, interpretar) {
       } catch (e) {
         ultimo = e;
         if (typeof registrar === 'function') registrar(`${modelo} (${etapa}): ${e.tipo || 'erro'} ${e.detalhe || e.message}`);
-        if (e.tipo === 'minuto') { await esperar(30000); continue; } // limite por minuto: espera e repete
+        if (e.tipo === 'minuto') { await esperar(Math.min(e.esperaMs || 30000, 70000)); continue; } // passa em segundos
+        if (e.tipo === 'limite') marcarEsgotado(modelo);
         if (e.tipo === 'modelo' || e.tipo === 'limite') break;       // sem esse modelo: vai para o próximo
         if (e.tipo === 'vazia') { if (++vazias >= 2) break; continue; } // insistir pouco: troca de modelo
         if (e.tipo !== 'ocupado') throw e;

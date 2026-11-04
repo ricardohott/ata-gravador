@@ -11,7 +11,7 @@ function confere(nome, cond) {
 
 // gemini.js roda num contexto isolado só para ler o esquema
 const ctx = { localStorage: { getItem: () => null }, fetch: () => {} };
-vm.runInNewContext(fs.readFileSync('public/gemini.js', 'utf8') + ';this.ESQUEMA_ATA = ESQUEMA_ATA; this.ESQUEMA_FALAS = ESQUEMA_FALAS; this.tipoAudio = tipoAudio; this.relogio = relogio; this.lerFalas = lerFalas; this.lerJson = lerJson; this.ordemParaAudio = ordemParaAudio;', ctx);
+vm.runInNewContext(fs.readFileSync('public/gemini.js', 'utf8') + ';this.ESQUEMA_ATA = ESQUEMA_ATA; this.ESQUEMA_FALAS = ESQUEMA_FALAS; this.tipoAudio = tipoAudio; this.relogio = relogio; this.lerFalas = lerFalas; this.lerJson = lerJson; this.ordemParaAudio = ordemParaAudio; this.lerLimite = lerLimite; this.proximaRenovacao = proximaRenovacao;', ctx);
 
 const servidor = app.listen(0, async () => {
   const base = `http://localhost:${servidor.address().port}`;
@@ -50,6 +50,16 @@ const servidor = app.listen(0, async () => {
     confere('silêncio (lista vazia) não é erro', ctx.lerFalas(resposta('{"falas":[]}')).length === 0);
     const ordem = ctx.ordemParaAudio(['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-flash-lite-latest']);
     confere('áudio evita 3.8 e flash-latest', ordem[0] === 'gemini-3.6-flash' && ordem[1] === 'gemini-2.5-flash' && ordem.indexOf('gemini-3.8-flash') > ordem.indexOf('gemini-flash-lite-latest'));
+
+    // Limites do Google: o tipo vem nos detalhes do erro, não no texto.
+    const erro429 = (quotaId, retryDelay) => ({ message: 'You exceeded your current quota.', details: [{ violations: [{ quotaId }] }, { retryDelay }] });
+    const dia = ctx.lerLimite(erro429('GenerateRequestsPerDayPerProjectPerModel-FreeTier', '20s'));
+    confere('limite diário é reconhecido pelos detalhes', dia.diario === true);
+    const minuto = ctx.lerLimite(erro429('GenerateRequestsPerMinutePerProjectPerModel-FreeTier', '12s'));
+    confere('limite por minuto não é confundido com o diário', minuto.diario === false && minuto.esperaMs === 13000);
+    confere('espera também é lida do texto do erro', ctx.lerLimite({ message: 'Please retry in 7.5s.' }).esperaMs === 8500);
+    const agora = Date.UTC(2026, 10, 4, 20, 0, 0); // 04/11, 12:00 em Los Angeles (UTC-8)
+    confere('renovação na meia-noite do Pacífico', ctx.proximaRenovacao(agora) === Date.UTC(2026, 10, 5, 8, 0, 0));
 
     // Corte de m4a real (fixture de 20 s, gerada com ffmpeg)
     const ctxM4a = { Blob, Uint8Array, DataView, Math, Number, String, Set, Array, Infinity };
