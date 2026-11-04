@@ -117,21 +117,83 @@ async function lerIndiceM4a(blob) {
       }
     }
     if (q !== total || !total) return null;
-    return { quadros, config, segundos: (total * 1024) / escala, quadrosPorSeg: escala / 1024 };
+    const stsd = new Uint8Array(moov.buffer.slice(moov.byteOffset + t.stsd.de - 8, moov.byteOffset + t.stsd.ate));
+    return { quadros, config, stsd, escala, segundos: (total * 1024) / escala, quadrosPorSeg: escala / 1024 };
   } catch {
     return null; // arquivo diferente do esperado: quem chamou usa o outro caminho
   }
 }
 
-// Monta o .aac do trecho de..ate (segundos). Cada quadro ganha o cabeçalho ADTS de 7 bytes.
-async function trechoAac(blob, indice, de, ate) {
+// Quadros do trecho e os bytes deles, lidos só daquela faixa do arquivo.
+async function lerTrecho(blob, indice, de, ate) {
   const primeiro = Math.floor(de * indice.quadrosPorSeg);
   const ultimo = Math.min(indice.quadros.length, Math.ceil(ate * indice.quadrosPorSeg));
   const quadros = indice.quadros.slice(primeiro, ultimo);
   if (!quadros.length) return null;
   const inicio = quadros.reduce((m, f) => Math.min(m, f.pos), Infinity);
   const fim = quadros.reduce((m, f) => Math.max(m, f.pos + f.tam), 0);
-  const origem = new Uint8Array(await blob.slice(inicio, fim).arrayBuffer());
+  return { quadros, inicio, origem: new Uint8Array(await blob.slice(inicio, fim).arrayBuffer()) };
+}
+
+// ---------- montar um .m4a pequeno (para o Groq, que não aceita .aac) ----------
+
+const u32 = (n) => [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255];
+const u16 = (n) => [(n >>> 8) & 255, n & 255];
+const zeros = (n) => new Array(n).fill(0);
+const ascii = (t) => [...t].map((c) => c.charCodeAt(0));
+
+function juntar(partes) {
+  const lista = partes.map((p) => (p instanceof Uint8Array ? p : Uint8Array.from(p)));
+  const saida = new Uint8Array(lista.reduce((n, p) => n + p.length, 0));
+  let pos = 0;
+  for (const p of lista) { saida.set(p, pos); pos += p.length; }
+  return saida;
+}
+const caixa = (nome, ...partes) => {
+  const corpo = juntar(partes);
+  return juntar([u32(corpo.length + 8), ascii(nome), corpo]);
+};
+
+async function trechoM4a(blob, indice, de, ate) {
+  const trecho = await lerTrecho(blob, indice, de, ate);
+  if (!trecho) return null;
+  const { quadros, inicio, origem } = trecho;
+  const dados = new Uint8Array(quadros.reduce((n, f) => n + f.tam, 0));
+  const stsz = new Uint8Array(12 + quadros.length * 4);
+  const vista = new DataView(stsz.buffer);
+  vista.setUint32(8, quadros.length);
+  let p = 0;
+  quadros.forEach((f, i) => {
+    dados.set(origem.subarray(f.pos - inicio, f.pos - inicio + f.tam), p);
+    vista.setUint32(12 + i * 4, f.tam);
+    p += f.tam;
+  });
+  const ftyp = caixa('ftyp', ascii('M4A '), u32(0), ascii('M4A isommp42'));
+  const posDados = ftyp.length + 8;
+  const duracao = quadros.length * 1024;
+  const identidade = [...u32(0x10000), ...zeros(12), ...u32(0x10000), ...zeros(12), ...u32(0x40000000)];
+  const mvhd = caixa('mvhd', zeros(12), u32(indice.escala), u32(duracao), u32(0x10000), u16(0x100), zeros(10), identidade, zeros(24), u32(2));
+  const tkhd = caixa('tkhd', u32(3), zeros(8), u32(1), zeros(4), u32(duracao), zeros(12), u16(0x100), zeros(2), identidade, zeros(8));
+  const mdhd = caixa('mdhd', zeros(12), u32(indice.escala), u32(duracao), u16(0x55c4), zeros(2));
+  const hdlr = caixa('hdlr', zeros(8), ascii('soun'), zeros(13));
+  const dref = caixa('dref', zeros(4), u32(1), caixa('url ', u32(1)));
+  const stbl = caixa('stbl',
+    indice.stsd,
+    caixa('stts', zeros(4), u32(1), u32(quadros.length), u32(1024)),
+    caixa('stsc', zeros(4), u32(1), u32(1), u32(quadros.length), u32(1)),
+    caixa('stsz', stsz),
+    caixa('stco', zeros(4), u32(1), u32(posDados)));
+  const minf = caixa('minf', caixa('smhd', zeros(8)), caixa('dinf', dref), stbl);
+  const moov = caixa('moov', mvhd, caixa('trak', tkhd, caixa('mdia', mdhd, hdlr, minf)));
+  return new Blob([ftyp, u32Bloco(dados.length + 8), dados, moov], { type: 'audio/m4a' });
+}
+const u32Bloco = (n) => Uint8Array.from([...u32(n), ...ascii('mdat')]);
+
+// Monta o .aac do trecho de..ate (segundos). Cada quadro ganha o cabeçalho ADTS de 7 bytes.
+async function trechoAac(blob, indice, de, ate) {
+  const trecho = await lerTrecho(blob, indice, de, ate);
+  if (!trecho) return null;
+  const { quadros, inicio, origem } = trecho;
   const saida = new Uint8Array(quadros.reduce((n, f) => n + f.tam + 7, 0));
   const { freq, canais } = indice.config;
   let p = 0;

@@ -180,7 +180,7 @@ async function chamarGemini(caminho, corpo, chave = chaveGemini()) {
   }
   if (r.status === 404) {
     localStorage.removeItem('ata-modelo'); // o modelo saiu do ar: a próxima tentativa escolhe outro
-    localStorage.removeItem('ata-modelos');
+    localStorage.removeItem('ata-modelos2');
     throw new ErroGemini('O modelo do Gemini mudou de nome. Toque em "Tentar de novo".', 'modelo');
   }
   throw Object.assign(new ErroGemini(`O Gemini recusou o pedido (${r.status}). ${msg}`.trim(), 'outro'), { status: r.status, detalhe: msg });
@@ -239,14 +239,15 @@ async function listarModelos(chave = chaveGemini()) {
     ...porVersao(/^gemini-[\d.]+-flash$/),
     ...nomes.filter((n) => n === 'gemini-flash-lite-latest'),
     ...porVersao(/^gemini-[\d.]+-flash-lite$/),
+    // Qualquer outro Flash da chave (ex.: prévias) entra como reserva: cada modelo tem a própria cota.
+    ...nomes.filter((n) => /flash/.test(n) && !/image|tts|live|audio|robotics|embedding|computer/.test(n)),
   ];
-  return ordem.length ? ordem : ['gemini-flash-latest'];
+  return ordem.length ? [...new Set(ordem)] : ['gemini-flash-latest'];
 }
 
 async function escolherModelo(chave) {
   const modelos = await listarModelos(chave);
-  localStorage.setItem('ata-reservas', JSON.stringify(modelos.slice(1, 3)));
-  localStorage.setItem('ata-modelos', JSON.stringify(modelos));
+  localStorage.setItem('ata-modelos2', JSON.stringify(modelos));
   return modelos[0];
 }
 
@@ -264,31 +265,18 @@ function ordemParaAudio(modelos) {
   return modelos.map((m, i) => [nota(m), i, m]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
 }
 
-async function modelosParaAudio() {
-  let modelos = null;
-  try { modelos = JSON.parse(localStorage.getItem('ata-modelos') || 'null'); } catch { /* busca de novo */ }
-  if (!Array.isArray(modelos) || !modelos.length) {
-    try {
-      modelos = await listarModelos();
-      localStorage.setItem('ata-modelos', JSON.stringify(modelos));
-    } catch {
-      modelos = [modeloGemini(), ...(await modelosReserva())];
-    }
-  }
-  return ordemParaAudio(modelos).slice(0, 4);
-}
-
-async function modelosReserva() {
+// Lista de modelos da chave, guardada. Sem conseguir buscar, segue só com o modelo principal.
+async function modelosDisponiveis() {
   try {
-    const salvos = JSON.parse(localStorage.getItem('ata-reservas') || 'null');
-    if (Array.isArray(salvos)) return salvos;
-  } catch { /* lista corrompida: busca de novo */ }
+    const salvos = JSON.parse(localStorage.getItem('ata-modelos2') || 'null');
+    if (Array.isArray(salvos) && salvos.length) return salvos;
+  } catch { /* busca de novo */ }
   try {
-    const reservas = (await listarModelos()).filter((m) => m !== modeloGemini()).slice(0, 2);
-    localStorage.setItem('ata-reservas', JSON.stringify(reservas));
-    return reservas;
+    const modelos = await listarModelos();
+    localStorage.setItem('ata-modelos2', JSON.stringify(modelos));
+    return modelos;
   } catch {
-    return [];
+    return [modeloGemini()];
   }
 }
 
@@ -303,7 +291,8 @@ const ocupadoAte = {};
 // `interpretar` valida a resposta aqui dentro: resposta vazia ou quebrada conta como falha do
 // modelo (tenta de novo e depois troca), em vez de virar erro para a pessoa.
 async function gerar(corpo, etapa, interpretar) {
-  const todos = etapa === 'transcricao' ? await modelosParaAudio() : [modeloGemini(), ...(await modelosReserva())];
+  const lista = await modelosDisponiveis();
+  const todos = etapa === 'transcricao' ? ordemParaAudio(lista) : [...new Set([modeloGemini(), ...lista])];
   const semCota = esgotados();
   const comCota = todos.filter((m) => !(semCota[m] > Date.now()));
   if (!comCota.length) throw new ErroGemini('O limite gratuito de hoje do Gemini acabou.', 'limite');
@@ -465,15 +454,31 @@ Uma voz que ainda não apareceu recebe o próximo número livre (a partir de ${m
   }, 'transcricao', lerFalas);
 }
 
+// Tenta o Gemini; se todos os modelos dele falharem por limite ou instabilidade, usa o Groq.
+async function comReserva(principal, reserva) {
+  try {
+    return await principal();
+  } catch (e) {
+    if (!reserva || !chaveGroq() || !['limite', 'ocupado', 'vazia', 'minuto'].includes(e.tipo)) throw e;
+    registrar(`Gemini sem resposta (${e.tipo}); usando a reserva`);
+    return reserva();
+  }
+}
+
 async function escreverAta({ transcricao, inicio, duracaoSeg, contexto }) {
   const cabecalho = [
     inicio && `Início: ${new Date(inicio).toLocaleString('pt-BR')}`,
     duracaoSeg && `Duração: ${Math.max(1, Math.round(duracaoSeg / 60))} min`,
     contexto && `Anotação de quem gravou: ${contexto}`,
   ].filter(Boolean).join('\n');
-  return gerar({
-    systemInstruction: { parts: [{ text: PEDIDO_ATA }] },
-    contents: [{ role: 'user', parts: [{ text: `${cabecalho}\n\n<transcricao>\n${transcricao}\n</transcricao>` }] }],
-    generationConfig: { maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_ATA },
-  }, 'ata', lerJson);
+  const conteudo = `${cabecalho}\n\n<transcricao>\n${transcricao}\n</transcricao>`;
+  return comReserva(
+    () => gerar({
+      systemInstruction: { parts: [{ text: PEDIDO_ATA }] },
+      contents: [{ role: 'user', parts: [{ text: conteudo }] }],
+      generationConfig: { maxOutputTokens: 32768, responseMimeType: 'application/json', responseJsonSchema: ESQUEMA_ATA },
+    }, 'ata', lerJson),
+    // Ata longa não cabe no plano grátis do Groq: fica para quando o Gemini renovar.
+    conteudo.length <= LIMITE_ATA_GROQ_CARACTERES ? () => ataGroq(PEDIDO_ATA, conteudo, ESQUEMA_ATA) : null,
+  );
 }

@@ -473,13 +473,18 @@ function transcreverPendentes(id) {
       if (seg.texto != null || (r.status === 'gravando' && !seg.fechado)) continue;
       // Contexto para manter a numeração: as últimas falas do trecho anterior, já rotuladas.
       const antes = falasDe({ segmentos: r.segmentos.filter((p) => p.n < seg.n) });
-      const anterior = antes.slice(-12).map((f) => `Pessoa ${f.pessoa}: ${f.texto}`).join('\n').slice(-2500);
+      const rotulo = (f) => (f.pessoa ? `Pessoa ${f.pessoa}: ${f.texto}` : f.texto);
+      const anterior = antes.slice(-12).map(rotulo).join('\n').slice(-2500);
       const maior = antes.reduce((m, f) => Math.max(m, f.pessoa), 0);
       const t0 = Date.now();
       let falas;
+      const audioImportado = seg.janela ? await lerAudio(id, 0) : null;
       const trecho = seg.janela ? await trechoCortado(id, seg.janela) : null;
       if (trecho) {
-        falas = await transcreverAudio(trecho, 'audio/aac', anterior, maior);
+        falas = await comReserva(
+          () => transcreverAudio(trecho, 'audio/aac', anterior, maior),
+          async () => transcreverGroq(await trechoM4a(audioImportado.blob, indiceAberto.indice, seg.janela.de, seg.janela.ate), `parte-${seg.n + 1}.m4a`, anterior),
+        );
         registrar(`trecho ${seg.n} (${fmtDuracao(seg.janela.de)}–${fmtDuracao(seg.janela.ate)}) transcrito em ${Math.round((Date.now() - t0) / 1000)} s (${Math.round(trecho.size / 1024)} KB, ${falas.length} falas)`);
       } else if (seg.janela) {
         // Áudio que não dá para cortar aqui: vai inteiro para o Google e cada parte é uma janela de tempo.
@@ -499,19 +504,24 @@ function transcreverPendentes(id) {
       } else {
         const audio = await lerAudio(id, seg.n);
         if (!audio) { seg.texto = ''; continue; }
-        falas = await transcreverAudio(audio.blob, audio.mime || seg.mime, anterior, maior);
+        const mimeParte = audio.mime || seg.mime;
+        falas = await comReserva(
+          () => transcreverAudio(audio.blob, mimeParte, anterior, maior),
+          () => transcreverGroq(new Blob([audio.blob], { type: tipoAudio(mimeParte) }), `parte-${seg.n + 1}.${extensaoAudio(tipoAudio(mimeParte))}`, anterior),
+        );
         registrar(`parte ${seg.n} transcrita em ${Math.round((Date.now() - t0) / 1000)} s (${Math.round(audio.blob.size / 1024)} KB, ${falas.length} falas)`);
       }
-      const texto = falas.map((f) => `Pessoa ${f.pessoa}: ${f.texto}`).join('\n');
+      const texto = falas.map(rotulo).join('\n');
+      const reserva = falas.some((f) => !f.pessoa); // o Whisper não separa quem fala
       // Reler antes de gravar: a tela de gravação pode ter acrescentado pedaços nesse meio-tempo.
       const atual = await lerReuniao(id);
       const alvo = atual.segmentos.find((p) => p.n === seg.n);
-      if (alvo) Object.assign(alvo, { texto, falas });
-      Object.assign(seg, { texto, falas });
+      if (alvo) Object.assign(alvo, { texto, falas, reserva });
+      Object.assign(seg, { texto, falas, reserva });
       // A gravação em curso guarda a reunião na memória e a salva a cada 10 s;
       // sem isso ela apagaria o texto recém-chegado e o trecho seria pago duas vezes.
       const viva = gravacao.reuniao?.id === id && gravacao.reuniao.segmentos.find((p) => p.n === seg.n);
-      if (viva) Object.assign(viva, { texto, falas });
+      if (viva) Object.assign(viva, { texto, falas, reserva });
       await salvarReuniao(atual);
       if (telaAberta === id) renderDetalhe(atual);
     }
@@ -723,7 +733,8 @@ function renderDetalhe(r) {
     ? `${feitos} de ${total} ${total === 1 ? 'parte transcrita' : 'partes transcritas'} e salvas. Renova por volta de ${new Date(r.limiteAte).toLocaleString('pt-BR', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}: abra o app depois disso e ele continua de onde parou.`
     : 'A gravação continua guardada neste celular.'}</p>
       <div class="acoes-detalhe" style="margin-top:12px"><button class="btn primario" data-acao="tentar">Tentar de novo</button>
-        ${r.erroTipo === 'chave' ? '<button class="btn secundario" data-acao="ajustes">Trocar a chave</button>' : ''}</div>
+        ${r.erroTipo === 'chave' ? '<button class="btn secundario" data-acao="ajustes">Trocar a chave</button>' : ''}
+        ${r.erroTipo === 'limite' && !chaveGroq() ? '<button class="btn secundario" data-acao="ajustes">Ligar a reserva grátis</button>' : ''}</div>
     </div>`;
   }
 
@@ -751,6 +762,8 @@ function renderDetalhe(r) {
 
   const falas = falasDe(r);
   const pessoas = pessoasDe(r);
+  const naReserva = r.segmentos.filter((p) => p.reserva).length;
+  if (naReserva) corpo += `<p class="sub pequeno">${naReserva} de ${total} ${total === 1 ? 'parte foi transcrita' : 'partes foram transcritas'} pelo modelo reserva, que não separa quem fala.</p>`;
   if (pessoas.length && r.status !== 'gravando') {
     const papel = (n) => (s?.pessoas || []).find((p) => p.numero === n)?.papel || '';
     const qtd = (n) => falas.filter((f) => f.pessoa === n).length;
@@ -913,7 +926,7 @@ $('#tela-detalhe').addEventListener('click', async (e) => {
     // A numeração de quem fala pode mudar, então os nomes da transcrição antiga não valem mais.
     const digitados = Object.keys(r.nomes || {}).some((n) => !r.nomesAuto?.[n]);
     if (digitados && !confirm('Refazer a transcrição apaga os nomes que você escreveu nesta reunião. Continuar?')) return;
-    for (const p of r.segmentos) { p.texto = null; delete p.falas; }
+    for (const p of r.segmentos) { p.texto = null; delete p.falas; delete p.reserva; }
     Object.assign(r, { resumo: null, transcricao: '', nomes: {}, nomesAuto: {} });
     await salvarReuniao(r);
     processar(id);
@@ -985,6 +998,10 @@ function abrirAjustes() {
   $('#erro-entrar').hidden = true;
   $('#btn-cancelar-chave').hidden = !chaveGemini();
   $('#btn-diagnostico').hidden = !chaveGemini();
+  $('#form-groq').hidden = !chaveGemini();
+  $('#chave-groq').value = '';
+  $('#chave-groq').placeholder = chaveGroq() ? 'Reserva ligada (cole outra para trocar)' : 'Cole a chave do Groq';
+  $('#erro-groq').hidden = true;
   mostrar('entrar');
 }
 $('#btn-ajustes').addEventListener('click', abrirAjustes);
@@ -1003,6 +1020,26 @@ $('#btn-diagnostico').addEventListener('click', async () => {
     avisar('Relatório copiado. Cole no WhatsApp para quem cuida do app.');
   } catch {
     avisar('Não consegui copiar o relatório neste celular.');
+  }
+});
+
+$('#form-groq').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const chave = $('#chave-groq').value.trim();
+  const botao = $('#btn-groq');
+  botao.disabled = true; botao.textContent = 'Conferindo...';
+  $('#erro-groq').hidden = true;
+  try {
+    await chamarGroq('models', null, chave); // testa a chave de verdade antes de guardar
+    localStorage.setItem('ata-chave-groq', chave);
+    avisar('Reserva ligada. Reuniões paradas pelo limite vão continuar.');
+    renderLista(); mostrar('inicio');
+    retomarPassageiras();
+  } catch (erro) {
+    $('#erro-groq').textContent = erro.tipo === 'rede' ? erro.message : 'Essa chave não funcionou. Confira se copiou inteira.';
+    $('#erro-groq').hidden = false;
+  } finally {
+    botao.disabled = false; botao.textContent = 'Salvar reserva';
   }
 });
 
@@ -1058,7 +1095,7 @@ async function retomarPassageiras() {
     for (const r of await todasReunioes()) {
       // A segunda condição pega erros 5xx gravados por versões antigas do app, sem o tipo.
       const passageira = ['ocupado', 'rede', 'minuto', 'vazia'].includes(r.erroTipo) || /\(5\d\d\)/.test(r.erro || '')
-        || (r.erroTipo === 'limite' && Date.now() > (r.limiteAte || (r.erroEm || 0) + 3 * 3600 * 1000)); // só depois de renovar
+        || (r.erroTipo === 'limite' && (chaveGroq() || Date.now() > (r.limiteAte || (r.erroEm || 0) + 3 * 3600 * 1000))); // com reserva, não espera a renovação
       if (r.status === 'erro' && passageira && r.segmentos.length) await processar(r.id);
     }
   } finally {

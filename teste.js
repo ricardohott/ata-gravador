@@ -19,7 +19,7 @@ const servidor = app.listen(0, async () => {
     const html = await (await fetch(base + '/')).text();
     confere('página inicial abre', html.includes('btn-gravar'));
     confere('gemini.js carrega antes do app.js', html.indexOf('gemini.js') < html.indexOf('app.js'));
-    for (const f of ['/app.js', '/gemini.js', '/style.css', '/manifest.json', '/sw.js', '/icon-192.png', '/icon-512.png', '/marca.svg']) {
+    for (const f of ['/app.js', '/gemini.js', '/groq.js', '/m4a.js', '/style.css', '/manifest.json', '/sw.js', '/icon-192.png', '/icon-512.png', '/marca.svg']) {
       confere(`${f} existe`, (await fetch(base + f)).ok);
     }
     const sw = fs.readFileSync('public/sw.js', 'utf8');
@@ -63,7 +63,7 @@ const servidor = app.listen(0, async () => {
 
     // Corte de m4a real (fixture de 20 s, gerada com ffmpeg)
     const ctxM4a = { Blob, Uint8Array, DataView, Math, Number, String, Set, Array, Infinity };
-    vm.runInNewContext(fs.readFileSync('public/m4a.js', 'utf8') + ';this.lerIndiceM4a = lerIndiceM4a; this.trechoAac = trechoAac;', ctxM4a);
+    vm.runInNewContext(fs.readFileSync('public/m4a.js', 'utf8') + ';this.lerIndiceM4a = lerIndiceM4a; this.trechoAac = trechoAac; this.trechoM4a = trechoM4a;', ctxM4a);
     const fixture = new Blob([fs.readFileSync('teste-audio.m4a')]);
     const indice = await ctxM4a.lerIndiceM4a(fixture);
     confere('lê o índice do m4a', !!indice && Math.abs(indice.segundos - 20) < 0.2);
@@ -71,6 +71,9 @@ const servidor = app.listen(0, async () => {
     const bytes = new Uint8Array(await parte.arrayBuffer());
     confere('trecho cortado começa com cabeçalho ADTS', bytes[0] === 0xff && (bytes[1] & 0xf0) === 0xf0);
     confere('trecho tem o tamanho esperado', Math.abs(parte.size / fixture.size - 0.25) < 0.05);
+    const m4aMenor = await ctxM4a.trechoM4a(fixture, indice, 5, 10);
+    const reaberto = await ctxM4a.lerIndiceM4a(m4aMenor);
+    confere('m4a gerado para a reserva é um m4a válido de 5 s', !!reaberto && Math.abs(reaberto.segundos - 5) < 0.2);
     confere('arquivo que não é m4a devolve null', (await ctxM4a.lerIndiceM4a(new Blob(['nao sou audio nenhum']))) === null);
   } catch (e) {
     falhas++; console.error(e);

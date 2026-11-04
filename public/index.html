@@ -34,6 +34,13 @@
         <button id="btn-cancelar-chave" class="btn secundario" type="button" hidden>Voltar</button>
         <button id="btn-diagnostico" class="btn-link" type="button" hidden>Copiar relatório de problemas</button>
       </form>
+      <!-- Reserva opcional: entra quando todos os modelos do Gemini param -->
+      <form id="form-groq" hidden>
+        <p class="sub pequeno"><b>Reserva grátis:</b> se o limite do Gemini acabar, a transcrição continua no Groq, mas sem separar quem fala. Crie a chave em <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a> e cole aqui.</p>
+        <input id="chave-groq" type="password" autocomplete="off" placeholder="Cole a chave do Groq" required>
+        <button id="btn-groq" class="btn secundario" type="submit">Salvar reserva</button>
+        <p id="erro-groq" class="erro" hidden></p>
+      </form>
     </div>
   </section>
 
@@ -97,6 +104,7 @@
   <div id="aviso" class="aviso" hidden></div>
 
   <script src="gemini.js"></script>
+  <script src="groq.js"></script>
   <script src="m4a.js"></script>
   <script src="app.js"></script>
 </body>
